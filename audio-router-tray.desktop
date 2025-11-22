@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Audio Router Tray Icon
+Comment=System tray icon for PipeWire/PulseAudio audio routing
+Icon=audio-card
+Exec=~/.config/pipewire-router/venv/bin/python3 ~/.config/pipewire-router/src/tray_icon.py
+StartupNotify=true
+Categories=Audio;System;
+
+# KDE specific
+X-KDE-StartupNotify=true
