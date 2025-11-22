@@ -32,6 +32,8 @@ cp -r "$PROJECT_DIR"/src "$CONFIG_DIR/"
 cp -r "$PROJECT_DIR"/config "$CONFIG_DIR/"
 cp "$PROJECT_DIR"/README.md "$CONFIG_DIR/"
 cp "$PROJECT_DIR"/requirements.txt "$CONFIG_DIR/"
+cp "$PROJECT_DIR"/launch-tray-icon.sh "$CONFIG_DIR/" 2>/dev/null || true
+chmod +x "$CONFIG_DIR/launch-tray-icon.sh" 2>/dev/null || true
 
 # Create virtual environment
 echo "Creating Python virtual environment..."
@@ -52,17 +54,7 @@ echo "Generating initial routing configuration..."
 
 # Create startup script for systemd
 echo "Creating systemd startup script..."
-cat > "$CONFIG_DIR/generate-config-startup.sh" << 'SCRIPT_EOF'
-#!/bin/bash
-# Startup script to generate routing config
-VENV_DIR="$HOME/.config/pipewire-router/venv"
-PYTHON="$VENV_DIR/bin/python3"
-AUDIO_ROUTER="$VENV_DIR/../src/audio_router.py"
-CONFIG_FILE="$VENV_DIR/../config/routing_rules.yaml"
-
-"$PYTHON" "$AUDIO_ROUTER" generate-config --output "$CONFIG_FILE" 2>&1 | logger -t pipewire-router-startup
-exit 0
-SCRIPT_EOF
+printf '#!/bin/bash\n# Startup script to generate routing config\nVENV_DIR="$HOME/.config/pipewire-router/venv"\nPYTHON="$VENV_DIR/bin/python3"\nAUDIO_ROUTER="$VENV_DIR/../src/audio_router.py"\nCONFIG_FILE="$VENV_DIR/../config/routing_rules.yaml"\n\n"$PYTHON" "$AUDIO_ROUTER" generate-config --output "$CONFIG_FILE" 2>&1 | logger -t pipewire-router-startup\nexit 0\n' > "$CONFIG_DIR/generate-config-startup.sh"
 
 chmod +x "$CONFIG_DIR/generate-config-startup.sh"
 mkdir -p "$HOME/.config/systemd/user"
@@ -71,28 +63,16 @@ mkdir -p "$HOME/.config/systemd/user"
 echo "Installing systemd service..."
 SERVICE_FILE="$HOME/.config/systemd/user/pipewire-router.service"
 
-cat > "$SERVICE_FILE" << EOF
-[Unit]
-Description=PipeWire/PulseAudio Automatic Audio Stream Router
-After=pipewire.service
-
-[Service]
-Type=simple
-ExecStartPre=$CONFIG_DIR/generate-config-startup.sh
-ExecStart=$VENV_DIR/bin/python3 $CONFIG_DIR/src/audio_router.py monitor $CONFIG_DIR/config/routing_rules.yaml
-Restart=on-failure
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-Environment="PYTHONUNBUFFERED=1"
-
-[Install]
-WantedBy=default.target
-EOF
+printf '[Unit]\nDescription=PipeWire/PulseAudio Automatic Audio Stream Router\nAfter=pipewire.service\n\n[Service]\nType=simple\nExecStartPre=%s/generate-config-startup.sh\nExecStart=%s/bin/python3 %s/src/audio_router.py monitor %s/config/routing_rules.yaml\nRestart=on-failure\nRestartSec=5\nStandardOutput=journal\nStandardError=journal\nEnvironment="PYTHONUNBUFFERED=1"\n\n[Install]\nWantedBy=default.target\n' "$CONFIG_DIR" "$VENV_DIR" "$CONFIG_DIR" "$CONFIG_DIR" > "$SERVICE_FILE"
 
 # Reload systemd
 echo "Reloading systemd user daemon..."
 systemctl --user daemon-reload
+
+# Install tray icon desktop entry (optional, for GUI users)
+echo "Installing tray icon (optional)..."
+mkdir -p "$HOME/.config/autostart"
+cp "$PROJECT_DIR/audio-router-tray.desktop" "$HOME/.config/autostart/" 2>/dev/null || true
 
 echo ""
 echo "Installation complete!"
@@ -101,7 +81,23 @@ echo ""
 echo "Next steps:"
 echo "1. Start the service: systemctl --user start pipewire-router"
 echo "2. Enable on boot: systemctl --user enable pipewire-router"
-echo "3. Routing rules auto-generate based on connected devices on every startup"
-echo "4. To manually regenerate: $VENV_DIR/bin/python3 $CONFIG_DIR/src/audio_router.py generate-config $CONFIG_DIR/config/routing_rules.yaml"
-echo "5. View logs: journalctl --user -u pipewire-router --no-pager"
+echo "3. Check status: systemctl --user status pipewire-router --no-pager"
+echo ""
+echo "Routing rules auto-generate based on connected devices on every startup."
+echo ""
+echo "Optional - System Tray Icon:"
+echo "  The tray icon is optional. The audio router works perfectly without it."
+echo ""
+echo "  Requirements:"
+echo "  - Desktop environment with system tray support (KDE, Gnome, XFCE, etc.)"
+echo "  - python-gobject: sudo pacman -S python-gobject"
+echo ""
+echo "  Launch:"
+echo "  - Manual: ~/.config/pipewire-router/launch-tray-icon.sh"
+echo "  - Auto-launch on login (installed to ~/.config/autostart/)"
+echo ""
+echo "Helpful Commands:"
+echo "  View logs:        journalctl --user -u pipewire-router --no-pager"
+echo "  List devices:     ~/.config/pipewire-router/venv/bin/python3 -c 'import sys; sys.path.insert(0, \"~/.config/pipewire-router/src\"); from device_monitor import DeviceMonitor; m = DeviceMonitor(); print(\"\\n\".join(f\"{d['name']} ({d['type']})\" for d in m.get_all_devices()))'"
+echo "  Regenerate rules: ~/.config/pipewire-router/venv/bin/python3 ~/.config/pipewire-router/src/audio_router.py generate-config --output ~/.config/pipewire-router/config/routing_rules.yaml"
 echo ""

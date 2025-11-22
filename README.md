@@ -104,20 +104,76 @@ journalctl --user -u pipewire-router --no-pager
 
 **Note:** Routing rules are automatically generated on every service startup based on currently connected devices. No manual configuration needed!
 
+## System Tray Icon (Optional)
+
+A system tray icon is available for KDE Plasma and Gnome desktops. The tray shows:
+- **Left-click**: Display current routing status and connected devices
+- **Right-click menu**:
+  - **Pause/Resume**: Temporarily disable auto-routing without stopping service
+  - **Regenerate Config**: Force re-detection of devices and rule update
+  - **View Logs**: Open service logs in default text viewer
+  - **Quit**: Exit tray icon (service continues running)
+
+### Launching the Tray Icon
+
+The tray icon is **optional** - the core service works without it.
+
+```bash
+# Manual launch from terminal
+~/.config/pipewire-router/launch-tray-icon.sh
+
+# Auto-launch on login (installed during ./install.sh)
+# Desktop entry: ~/.config/autostart/audio-router-tray.desktop
+```
+
+**Requirements:**
+- A desktop environment with system tray support (KDE Plasma, Gnome, XFCE, etc.)
+- Display server (X11 or Wayland)
+- Python GTK bindings: `python-gobject`
+
+**Install on Arch/CachyOS:**
+```bash
+sudo pacman -S python-gobject
+```
+
+**Compatibility:**
+- **KDE Plasma 5/6**: Native StatusNotifierItem support
+- **Gnome 42+**: Uses DBus StatusNotifierItem
+- **XFCE, MATE, etc**: GTK-based tray integration
+
 ## Requirements
 
+### Core (Required)
 - PipeWire or PulseAudio
 - Python 3.8+
 - PyYAML
-- dbus-python (for device monitoring)
+
+### System Tray Icon (Optional)
+- `python-gobject` (Arch: `sudo pacman -S python-gobject`)
+- Display server (X11 or Wayland)
+- Desktop environment with system tray support
+
+*Note: Core audio routing works perfectly without the tray icon.*
 
 ## Installation
 
-1. Clone or copy this project to `~/.config/pipewire-router/`
-2. Install dependencies: `pip3 install -r requirements.txt`
-3. Run installation: `./install.sh`
-4. Configure routing rules in `config/routing_rules.yaml`
-5. Start the service: `systemctl --user start pipewire-router`
+1. Clone or copy this project
+2. Run installation: `./install.sh`
+3. Start the service: `systemctl --user start pipewire-router`
+4. Enable on boot: `systemctl --user enable pipewire-router`
+
+### Optional: Enable System Tray Icon
+
+```bash
+# Install GTK bindings
+sudo pacman -S python-gobject
+
+# Launch manually
+~/.config/pipewire-router/launch-tray-icon.sh
+
+# Or auto-launch on login (already enabled by ./install.sh)
+# Check: cat ~/.config/autostart/audio-router-tray.desktop
+```
 
 ## Device Names
 
