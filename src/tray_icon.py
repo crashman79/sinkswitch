@@ -82,26 +82,30 @@ class AudioRouterTrayIcon(QSystemTrayIcon):
         
         # Pause/Resume
         if self.paused:
-            pause_action = self.menu.addAction("▶ Resume Auto-Routing")
+            pause_action = QAction("▶ Resume Auto-Routing", self.menu)
         else:
-            pause_action = self.menu.addAction("⏸ Pause Auto-Routing")
+            pause_action = QAction("⏸ Pause Auto-Routing", self.menu)
         pause_action.triggered.connect(self.toggle_pause)
+        self.menu.addAction(pause_action)
         
         # Regenerate config
-        regen_action = self.menu.addAction("🔄 Regenerate Config")
+        regen_action = QAction("🔄 Regenerate Config", self.menu)
         regen_action.triggered.connect(self.regenerate_config)
+        self.menu.addAction(regen_action)
         
         self.menu.addSeparator()
         
         # View logs
-        logs_action = self.menu.addAction("📋 View Logs")
+        logs_action = QAction("📋 View Logs", self.menu)
         logs_action.triggered.connect(self.view_logs)
+        self.menu.addAction(logs_action)
         
         self.menu.addSeparator()
         
         # Quit
-        quit_action = self.menu.addAction("❌ Quit Tray Icon")
+        quit_action = QAction("❌ Quit Tray Icon", self.menu)
         quit_action.triggered.connect(self.app.quit)
+        self.menu.addAction(quit_action)
     
     def _on_tray_activated(self, reason):
         """Handle tray icon activation (left-click toggles pause)"""
