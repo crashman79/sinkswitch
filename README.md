@@ -10,6 +10,7 @@ A comprehensive configuration system for automatic audio stream switching in Pip
 - **Python Configuration Tool**: CLI and daemon modes for managing routing rules
 - **Systemd Integration**: Run as user service for persistent configuration
 - **PipeWire & PulseAudio Support**: Works with both audio systems
+- **System Tray Icon**: Optional PyQt6-based tray icon with visual status and quick controls
 
 ## Project Structure
 
@@ -149,9 +150,9 @@ sudo pacman -S python-gobject
 - PyYAML
 
 ### System Tray Icon (Optional)
-- `python-gobject` (Arch: `sudo pacman -S python-gobject`)
-- Display server (X11 or Wayland)
-- Desktop environment with system tray support
+- `python-pyqt6` (Arch: `sudo pacman -S python-pyqt6`)
+- Display server (X11 or Wayland with proper support)
+- Desktop environment with system tray support (KDE Plasma, Gnome, XFCE, MATE)
 
 *Note: Core audio routing works perfectly without the tray icon.*
 
@@ -162,18 +163,28 @@ sudo pacman -S python-gobject
 3. Start the service: `systemctl --user start pipewire-router`
 4. Enable on boot: `systemctl --user enable pipewire-router`
 
-### Optional: Enable System Tray Icon
+### Optional: System Tray Icon
 
+The system tray icon provides a visual indicator of routing status and quick controls. It auto-launches on login via desktop entry.
+
+**Manual launch:**
 ```bash
-# Install GTK bindings
-sudo pacman -S python-gobject
-
-# Launch manually
 ~/.config/pipewire-router/launch-tray-icon.sh
-
-# Or auto-launch on login (already enabled by ./install.sh)
-# Check: cat ~/.config/autostart/audio-router-tray.desktop
 ```
+
+**Features:**
+- 🟢 **Green circle** - Routes active (target devices connected)
+- 🟡 **Yellow circle** - Limited (service running, no target devices connected)
+- 🟣 **Purple circle** - Paused (routing paused)
+- 🔴 **Red circle** - Stopped (service not running)
+
+**Controls:**
+- **Left-click**: Toggle pause/resume routing
+- **Right-click**: Context menu (regenerate config, view logs, quit)
+- **Hover**: View detailed status with all routing rules
+
+**Autostart:**
+The tray icon is configured to auto-launch on login via `~/.config/autostart/audio-router-tray.desktop`. To disable autostart, remove or rename that file.
 
 ## Device Names
 
