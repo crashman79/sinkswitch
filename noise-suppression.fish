@@ -16,46 +16,63 @@ end
 # Check if arguments provided
 if test (count $argv) -eq 0
     # No arguments - show menu
-    echo "🎤 Noise Suppression Manager"
-    echo "============================"
+    echo "🎤 Audio Enhancement Tools"
+    echo "=========================="
     echo ""
-    echo "1. List Devices"
-    echo "2. Install"
-    echo "3. Start"
-    echo "4. Stop"
-    echo "5. Status"
-    echo "6. Set as Default Input (for games/apps that auto-grab mic)"
-    echo "7. Quick Start Guide"
+    echo "ECHO CANCELLATION (Removes speaker feedback from mic)"
+    echo "1. Enable echo cancellation"
+    echo "2. Disable echo cancellation"
+    echo "3. Check echo cancellation status"
+    echo ""
+    echo "NOISE SUPPRESSION (RNNoise - removes background noise)"
+    echo "4. Install noise suppression"
+    echo "5. Check noise suppression status"
+    echo ""
+    echo "6. Quit"
     echo ""
     
-    set -l choice (read -P "Choose option (1-7): ")
+    set -l choice (read -P "Choose option (1-6): ")
     
     switch $choice
         case 1
-            $python_exe "$ns_dir/noise_suppression.py" list-devices
-        case 2
             echo ""
-            echo "First, list your devices:"
+            echo "Available microphones:"
+            $python_exe "$ns_dir/echo_cancellation.py" list-devices
+            echo ""
+            set -l device (read -P "Enter device name (or press Enter for default): ")
+            if test -n "$device"
+                $python_exe "$ns_dir/echo_cancellation.py" enable --device "$device"
+            else
+                $python_exe "$ns_dir/echo_cancellation.py" enable
+            end
+        case 2
+            $python_exe "$ns_dir/echo_cancellation.py" disable
+        case 3
+            $python_exe "$ns_dir/echo_cancellation.py" status
+        case 4
+            echo ""
+            echo "Available microphones:"
             $python_exe "$ns_dir/noise_suppression.py" list-devices
             echo ""
             set -l device (read -P "Enter device name: ")
             if test -n "$device"
                 $python_exe "$ns_dir/noise_suppression.py" install --device "$device"
             end
-        case 3
-            $python_exe "$ns_dir/noise_suppression.py" start
-        case 4
-            $python_exe "$ns_dir/noise_suppression.py" stop
         case 5
             $python_exe "$ns_dir/noise_suppression.py" status
         case 6
-            $python_exe "$ns_dir/noise_suppression.py" set-default
-        case 7
-            cat "$ns_dir/QUICK_START.md"
+            exit 0
         case '*'
             echo "Invalid choice"
     end
 else
-    # Pass arguments directly to Python script
-    $python_exe "$ns_dir/noise_suppression.py" $argv
+    # Pass arguments to the appropriate script based on first argument
+    set -l cmd $argv[1]
+    set -l rest $argv[2..-1]
+    
+    if string match -q "echo*" "$cmd"
+        $python_exe "$ns_dir/echo_cancellation.py" $rest
+    else
+        $python_exe "$ns_dir/noise_suppression.py" $argv
+    end
 end
