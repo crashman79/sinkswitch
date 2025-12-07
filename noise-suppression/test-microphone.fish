@@ -2,7 +2,6 @@
 # Test audio processing by recording and playing back your microphone
 
 set -l script_dir (dirname (status -f))
-set -l ns_dir "$script_dir/noise-suppression"
 set -l test_file "/tmp/mic_test_$(date +%s).wav"
 
 echo "🎤 Microphone Audio Processing Test"
@@ -10,8 +9,7 @@ echo "==================================="
 echo ""
 
 # Check if noise suppression is active
-set -l python_exe "$ns_dir/venv/bin/python3"
-$python_exe "$ns_dir/noise_suppression_pulseaudio.py" status
+python3 "$script_dir/noise_suppression_pulseaudio.py" status
 
 echo ""
 echo "Recording Instructions:"
@@ -30,9 +28,9 @@ echo ""
 echo "🔴 RECORDING in 3 seconds... Speak now!"
 sleep 3
 
-# Record from the processed source
+# Record from the LifeCam microphone via ALSA
 echo "(Recording...)"
-pactl record-sample --format=s16le --rate=48000 --channels=2 "$test_file" $duration 2>&1 | grep -v "^$" || true
+timeout "$duration" arecord -D hw:0,0 -f S16_LE -r 48000 "$test_file" > /dev/null 2>&1
 
 if not test -f "$test_file"
     echo "❌ Recording failed"
@@ -40,15 +38,15 @@ if not test -f "$test_file"
 end
 
 set -l file_size (stat -f%z "$test_file" 2>/dev/null || stat -c%s "$test_file")
-echo "✓ Recording saved: $file_file ($(math "$file_size / 1000") KB)"
+echo "✓ Recording saved: $test_file ($(math "$file_size / 1000") KB)"
 echo ""
 
 # Analyze the recording
 echo "📊 Analysis:"
 echo "==========="
 
-# Calculate recording characteristics
-set -l expected_bytes (math "$duration * 48000 * 2 * 2")
+# Calculate recording characteristics (mono: 1 channel, 16-bit = 2 bytes)
+set -l expected_bytes (math "$duration * 48000 * 1 * 2")
 set -l percent (math "($file_size * 100) / $expected_bytes")
 
 if test $percent -lt 50
