@@ -183,6 +183,9 @@ class NoiseSuppressionEngine:
         """
         Install the noise suppression filter chain to PipeWire.
         
+        This creates the configuration files but doesn't restart PipeWire.
+        You must restart manually to avoid breaking audio.
+        
         Args:
             input_device: Input device name (uses default if None)
             
@@ -191,8 +194,9 @@ class NoiseSuppressionEngine:
         """
         try:
             config_content = self.create_filter_chain_config(input_device)
-            config_file = self.config_dir / "input-filter-chain.conf"
             
+            # Write the standalone filter chain config
+            config_file = self.config_dir / "input-filter-chain.conf"
             logger.info(f"Writing filter chain config to {config_file}")
             config_file.write_text(config_content)
             
@@ -208,7 +212,7 @@ class NoiseSuppressionEngine:
             subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
             subprocess.run(["systemctl", "--user", "enable", "pipewire-input-filter-chain.service"], check=True)
             
-            logger.info("Filter chain installed and enabled. Restart PipeWire or log out/in to activate.")
+            logger.info("Filter chain configured. Ready to activate.")
             return True
             
         except Exception as e:
@@ -217,18 +221,18 @@ class NoiseSuppressionEngine:
     
     def _create_systemd_service(self) -> str:
         """Create systemd service unit for filter chain."""
-        username = os.environ.get('USER', 'user')
         config_file = self.config_dir / "input-filter-chain.conf"
         
+        # Simple service that loads the config on demand
+        # User must manually restart PipeWire to activate
         service = f'''[Unit]
-Description=PipeWire Noise Suppression Filter Chain
-After=pipewire.service
+Description=PipeWire Noise Suppression Filter Chain Configuration
+Documentation=https://github.com/crashman79/pipewire-router
 
 [Service]
-Type=simple
-ExecStart=/usr/bin/sh -c 'exec /usr/bin/pipewire -c {config_file}'
-Restart=on-failure
-RestartSec=5
+Type=oneshot
+ExecStart=/bin/true
+RemainAfterExit=yes
 
 [Install]
 WantedBy=default.target
@@ -285,6 +289,63 @@ WantedBy=default.target
         except Exception as e:
             logger.error(f"Error checking status: {e}")
             return False
+    
+    def set_default_input(self) -> bool:
+        """Set the noise suppression source as the default input device."""
+        try:
+            # Get list of sources and find the noise cancelling one
+            result = subprocess.run(
+                ["pactl", "list", "sources"],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            
+            if result.returncode != 0:
+                logger.error("Failed to list sources with pactl")
+                return False
+            
+            # Parse output to find noise cancelling source
+            lines = result.stdout.split('\n')
+            current_source = None
+            source_name = None
+            
+            for i, line in enumerate(lines):
+                # Find source number
+                if line.startswith('Source #'):
+                    current_source = line.split('#')[1].strip()
+                
+                # Find the name
+                if 'Name:' in line:
+                    source_name = line.split('Name:')[1].strip()
+                
+                # Check if this is the noise cancelling source
+                if 'Description:' in line and source_name:
+                    desc = line.split('Description:')[1].strip()
+                    if 'Noise' in desc or 'rnnoise' in desc.lower():
+                        # Found it! Set as default
+                        try:
+                            subprocess.run(
+                                ["pactl", "set-default-source", source_name],
+                                check=True,
+                                capture_output=True
+                            )
+                            print(f"✓ Default microphone set to: {desc}")
+                            logger.info(f"Set default input to: {source_name}")
+                            return True
+                        except subprocess.CalledProcessError:
+                            logger.error(f"Failed to set {source_name} as default")
+                            continue
+            
+            # If we get here, didn't find noise cancelling source
+            logger.error("Could not find 'Noise cancelling source' in available devices")
+            print("✗ 'Noise cancelling source' not found")
+            print("  Make sure you have restarted PipeWire after installation")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error setting default input: {e}")
+            return False
 
 
 def main():
@@ -312,6 +373,9 @@ def main():
     # Status command
     subparsers.add_parser('status', help='Check noise suppression status')
     
+    # Set default input command
+    subparsers.add_parser('set-default', help='Make noise suppression the default microphone input')
+    
     args = parser.parse_args()
     
     engine = NoiseSuppressionEngine()
@@ -328,9 +392,15 @@ def main():
     
     elif args.command == 'install':
         if engine.install_filter_chain(args.device):
-            print("\n✓ Filter chain installed successfully!")
-            print("  To activate: restart PipeWire or log out/in")
-            print("  Then select 'Noise cancelling source' in your application audio settings")
+            print("\n✓ Filter chain configuration created!")
+            print("")
+            print("Next step: Restart PipeWire to activate")
+            print("  systemctl --user restart pipewire.service")
+            print("")
+            print("Then:")
+            print("  1. Check status: python3 noise_suppression.py status")
+            print("  2. Set as default (for games): python3 noise_suppression.py set-default")
+            print("  3. Or select 'Noise cancelling source' in app audio settings")
         else:
             print("✗ Failed to install filter chain")
             sys.exit(1)
@@ -351,6 +421,10 @@ def main():
     
     elif args.command == 'status':
         engine.status()
+    
+    elif args.command == 'set-default':
+        if not engine.set_default_input():
+            sys.exit(1)
     
     else:
         parser.print_help()

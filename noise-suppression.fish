@@ -24,10 +24,11 @@ if test (count $argv) -eq 0
     echo "3. Start"
     echo "4. Stop"
     echo "5. Status"
-    echo "6. Quick Start Guide"
+    echo "6. Set as Default Input (for games/apps that auto-grab mic)"
+    echo "7. Quick Start Guide"
     echo ""
     
-    set -l choice (read -P "Choose option (1-6): ")
+    set -l choice (read -P "Choose option (1-7): ")
     
     switch $choice
         case 1
@@ -48,6 +49,8 @@ if test (count $argv) -eq 0
         case 5
             $python_exe "$ns_dir/noise_suppression.py" status
         case 6
+            $python_exe "$ns_dir/noise_suppression.py" set-default
+        case 7
             cat "$ns_dir/QUICK_START.md"
         case '*'
             echo "Invalid choice"
