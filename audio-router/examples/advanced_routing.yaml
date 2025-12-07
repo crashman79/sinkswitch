@@ -1,0 +1,73 @@
+# Advanced Audio Routing Configuration Example
+# 
+# NOTE: This is a REFERENCE example showing advanced features.
+# The system automatically generates routing rules based on your connected devices.
+#
+# To see your actual auto-generated config:
+#   cat ~/.config/pipewire-router/config/routing_rules.yaml
+#
+# Manual configuration is optional - only edit if you want different routing than auto-generated.
+# Find device IDs: pactl list sinks | grep "Name:"
+
+routing_rules:
+  # Example: Route gaming to USB headset (higher priority than default)
+  - name: "Gaming to USB Headset"
+    applications:
+      - "steam"
+      - "lutris"
+      - "wine"
+    target_device: "alsa_output.usb-Logitech_Gaming_Headset-00.analog-stereo"
+    enable_default_fallback: true
+
+  # Example: Route conferencing to Bluetooth with fallback
+  - name: "Conference Apps to Bluetooth"
+    applications:
+      - "zoom"
+      - "teams"
+      - "discord"
+      - "slack"
+      - "skype"
+    target_device: "bluez_output.XX_XX_XX_XX_XX_XX.1"
+    enable_default_fallback: true
+
+  # Example: Route music players to Bluetooth speaker
+  - name: "Music Apps to Bluetooth Speaker"
+    applications:
+      - "spotify"
+      - "vlc"
+      - "rhythmbox"
+      - "cmus"
+      - "mpv"
+      - "audacious"
+    target_device: "bluez_output.XX_XX_XX_XX_XX_XX.1"
+    enable_default_fallback: true
+
+# Device ID Reference:
+# ===================
+# To find your device IDs, run:
+#   pactl list sinks
+#
+# Example output:
+#   Name: alsa_output.usb-Logitech_Headset-00.analog-stereo
+#   Name: bluez_output.00_02_3C_AD_09_85.1
+#   Name: alsa_output.pci-0000_0e_00.4.analog-stereo
+#
+# Then replace the XX_XX_XX_XX_XX_XX placeholders with your actual device IDs.
+      - "chromium"
+    application_keywords:
+      - "youtube"
+      - "netflix"
+      - "twitch"
+      - "prime video"
+      - "hulu"
+      - "disney"
+    target_device: "alsa_card.pci-monitor-speakers"
+    enable_default_fallback: true
+
+  # Route notifications to built-in speaker
+  - name: "System Notifications"
+    applications:
+      - "notify-send"
+      - "canberra-gtk-play"
+    target_device: "alsa_card.pci-builtin"
+    enable_default_fallback: true

@@ -1,0 +1,16 @@
+[Unit]
+Description=PipeWire/PulseAudio Automatic Audio Stream Router
+After=pipewire.service
+
+[Service]
+Type=simple
+ExecStartPre=/home/crashman79/.config/pipewire-router/generate-config-startup.sh
+ExecStart=/home/crashman79/.config/pipewire-router/venv/bin/python3 /home/crashman79/.config/pipewire-router/src/audio_router.py monitor /home/crashman79/.config/pipewire-router/config/routing_rules.yaml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment="PYTHONUNBUFFERED=1"
+
+[Install]
+WantedBy=default.target

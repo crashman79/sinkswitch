@@ -1,0 +1,31 @@
+routing_rules:
+- name: Browsers Apps to Bluetooth
+  applications:
+  - firefox
+  - chrome
+  - chromium
+  - opera
+  - edge
+  - brave
+  target_device: bluez_output.00_02_3C_AD_09_85.1
+  enable_default_fallback: true
+- name: Meetings Apps to Bluetooth
+  applications:
+  - zoom
+  - teams
+  - meet
+  - discord
+  - skype
+  - slack
+  target_device: bluez_output.00_02_3C_AD_09_85.1
+  enable_default_fallback: true
+- name: Music Apps to Bluetooth
+  applications:
+  - spotify
+  - vlc
+  - rhythmbox
+  - cmus
+  - mpv
+  - audacious
+  target_device: bluez_output.00_02_3C_AD_09_85.1
+  enable_default_fallback: true

@@ -1,6 +1,0 @@
-PyYAML>=6.0
-dbus-python>=1.2.18
-
-# Optional dependencies for tray icon
-# These are usually pre-installed on desktop systems
-PyQt6>=6.0  # For PyQt6 tray icon (proper Wayland support)
