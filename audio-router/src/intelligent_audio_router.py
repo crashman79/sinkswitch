@@ -56,7 +56,7 @@ class IntelligentAudioRouter:
     
     # Application categories
     APP_CATEGORIES = {
-        'browsers': ['firefox', 'chrome', 'chromium', 'opera', 'edge', 'brave'],
+        'browsers': ['firefox', 'chrome', 'chromium', 'opera', 'edge', 'brave', 'vivaldi'],
         'meetings': ['zoom', 'teams', 'meet', 'discord', 'skype', 'slack'],
         'music': ['spotify', 'vlc', 'rhythmbox', 'cmus', 'mpv', 'audacious'],
         'games': ['steam', 'lutris', 'wine', 'proton', 'wow', 'world of warcraft'],
