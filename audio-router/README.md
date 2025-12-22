@@ -7,7 +7,6 @@ Automatic audio stream routing based on application classes and connected output
 - **Intelligent Device Routing**: Automatically routes audio to different output devices based on application type
 - **Device Detection**: Automatically detects USB headsets, Bluetooth devices, HDMI outputs, and analog speakers
 - **Application Categories**: Groups applications by type (browsers, meetings, music, games) with optimized routing
-- **Virtual Microphone**: Optional noise suppression and echo cancellation for microphone input
 - **System Tray Icon**: KDE Plasma and Gnome desktop integration
 - **Daemon Mode**: Runs as systemd user service for automatic routing
 - **PulseAudio Compatible**: Works with both PipeWire and PulseAudio backends
@@ -64,7 +63,3 @@ routing_rules:
 ## Installation
 
 See SETUP_COMPLETE.md for detailed installation instructions.
-
-## Related
-
-- **Noise Suppression**: See `../noise-suppression/` for microphone noise suppression setup

@@ -9,14 +9,8 @@ Automatic audio stream routing based on application type and connected devices. 
 
 **Status**: ✅ Production-ready
 
-### [Noise Suppression](./noise-suppression/)
-Real-time noise suppression for microphone input using RNNoise.
-
-**Status**: 🔄 In development
-
 ## Quick Start
 
-### Audio Router
 ```bash
 cd audio-router
 ./install.sh
@@ -25,9 +19,6 @@ systemctl --user enable pipewire-router
 ```
 
 For detailed instructions, see [audio-router/README.md](./audio-router/README.md)
-
-### Noise Suppression
-Coming soon - see [noise-suppression/README.md](./noise-suppression/README.md)
 
 ## Project Structure
 
@@ -39,11 +30,6 @@ Coming soon - see [noise-suppression/README.md](./noise-suppression/README.md)
 │   ├── systemd/               # Systemd service files
 │   ├── install.sh             # Installation script
 │   └── README.md              # Audio router documentation
-│
-├── noise-suppression/         # Microphone input noise suppression
-│   ├── src/                   # Python source code (coming soon)
-│   └── README.md              # Noise suppression documentation
-│
 └── README.md                  # This file
 ```
 
