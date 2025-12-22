@@ -56,7 +56,8 @@ Coming soon - see [noise-suppression/README.md](./noise-suppression/README.md)
 ## License
 
 MIT
-## License
 
-MIT
+---
+
+<sub>Development assisted by AI tools including GitHub Copilot and OpenCode.</sub>
 
