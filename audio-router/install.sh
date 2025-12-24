@@ -34,6 +34,8 @@ cp "$PROJECT_DIR"/README.md "$CONFIG_DIR/"
 cp "$PROJECT_DIR"/requirements.txt "$CONFIG_DIR/"
 cp "$PROJECT_DIR"/launch-tray-icon.sh "$CONFIG_DIR/" 2>/dev/null || true
 chmod +x "$CONFIG_DIR/launch-tray-icon.sh" 2>/dev/null || true
+cp "$PROJECT_DIR"/launch-gui.sh "$CONFIG_DIR/" 2>/dev/null || true
+chmod +x "$CONFIG_DIR/launch-gui.sh" 2>/dev/null || true
 
 # Create virtual environment
 echo "Creating Python virtual environment..."
@@ -74,6 +76,11 @@ echo "Installing tray icon (optional)..."
 mkdir -p "$HOME/.config/autostart"
 cp "$PROJECT_DIR/audio-router-tray.desktop" "$HOME/.config/autostart/" 2>/dev/null || true
 
+# Install GUI desktop entry
+echo "Installing GUI application launcher..."
+mkdir -p "$HOME/.local/share/applications"
+cp "$PROJECT_DIR/audio-router-gui.desktop" "$HOME/.local/share/applications/" 2>/dev/null || true
+
 echo ""
 echo "Installation complete!"
 echo "=============================================="
@@ -85,12 +92,27 @@ echo "3. Check status: systemctl --user status pipewire-router --no-pager"
 echo ""
 echo "Routing rules auto-generate based on connected devices on every startup."
 echo ""
+echo "GUI Application:"
+echo "  Launch the graphical interface:"
+echo "  - From application menu: Search for 'PipeWire Audio Router'"
+echo "  - From terminal: ~/.config/pipewire-router/launch-gui.sh"
+echo ""
+echo "  Requirements:"
+echo "  - PyQt6: sudo pacman -S python-pyqt6"
+echo ""
+echo "  Features:"
+echo "  - Visual device list with real-time status"
+echo "  - Drag-and-drop rule creation"
+echo "  - Live audio stream monitoring"
+echo "  - Service control (start/stop/restart)"
+echo "  - Log viewer"
+echo ""
 echo "Optional - System Tray Icon:"
 echo "  The tray icon is optional. The audio router works perfectly without it."
 echo ""
 echo "  Requirements:"
 echo "  - Desktop environment with system tray support (KDE, Gnome, XFCE, etc.)"
-echo "  - python-gobject: sudo pacman -S python-gobject"
+echo "  - PyQt6: sudo pacman -S python-pyqt6"
 echo ""
 echo "  Launch:"
 echo "  - Manual: ~/.config/pipewire-router/launch-tray-icon.sh"

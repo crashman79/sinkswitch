@@ -17,6 +17,34 @@ class AudioRouterEngine:
     def __init__(self):
         self.device_monitor = DeviceMonitor()
     
+    def _ensure_a2dp_profile(self, sink_name: str) -> bool:
+        """Ensure Bluetooth device is using A2DP (high-fidelity) profile
+        
+        Args:
+            sink_name: Bluetooth sink name (e.g., 'bluez_output.00_02_3C_AD_09_85.1')
+        
+        Returns:
+            True if A2DP profile is active or was successfully set
+        """
+        try:
+            # Extract MAC address from sink name
+            # Format: bluez_output.00_02_3C_AD_09_85.1
+            if 'bluez' not in sink_name:
+                return True  # Not a Bluetooth device
+            
+            parts = sink_name.split('.')
+            if len(parts) < 3:
+                return False
+            
+            device_address = parts[1].replace('_', ':')  # Convert to colon format
+            
+            # Attempt to set A2DP profile
+            return self.device_monitor.prefer_a2dp_profile(device_address)
+        
+        except Exception as e:
+            logger.debug(f"Failed to ensure A2DP profile: {e}")
+            return False
+    
     def apply_rules(self, rules: List[Dict]) -> List[Dict]:
         """Apply routing rules to audio streams
         
@@ -45,31 +73,50 @@ class AudioRouterEngine:
         """
         rule_name = rule.get('name', 'Unknown')
         target_device = rule.get('target_device')
+        target_variants = rule.get('target_device_variants', [])
+        
+        # Build list of all target devices to try
+        all_targets = [target_device]
+        if target_variants:
+            all_targets = target_variants
         
         try:
-            # Check if target device is connected
-            if not self.device_monitor.device_connected(target_device):
+            # Check if any target device variant is connected
+            device_connected = False
+            connected_target = None
+            
+            for target in all_targets:
+                if self.device_monitor.device_connected(target):
+                    device_connected = True
+                    connected_target = target
+                    break
+            
+            if not device_connected:
                 return {
                     'rule_name': rule_name,
                     'success': False,
                     'message': f"Target device not connected: {target_device}"
                 }
             
+            # For Bluetooth devices, prefer A2DP profile
+            if 'bluez' in connected_target:
+                self._ensure_a2dp_profile(connected_target)
+            
             # Get applications to match
             applications = rule.get('applications', [])
             keywords = rule.get('application_keywords', [])
             
-            # Route matching applications to target device
+            # Route matching applications to target device (try all variants)
             routed = self._route_applications(
                 applications,
                 keywords,
-                target_device
+                all_targets
             )
             
             return {
                 'rule_name': rule_name,
                 'success': True,
-                'message': f"Successfully routed {routed} stream(s) to {target_device}"
+                'message': f"Successfully routed {routed} stream(s) to {connected_target}"
             }
         
         except Exception as e:
@@ -83,13 +130,13 @@ class AudioRouterEngine:
     def _route_applications(self,
                            applications: List[str],
                            keywords: List[str],
-                           target_device: str) -> int:
+                           target_devices: List[str]) -> int:
         """Route matching applications to target device
         
         Args:
             applications: List of application names to match
             keywords: List of keywords to search in window titles
-            target_device: Target device name
+            target_devices: List of target device names (tries each one)
             
         Returns:
             Number of streams routed
@@ -103,9 +150,12 @@ class AudioRouterEngine:
             # Find matching applications
             for app_name in running_apps:
                 if self._matches_rule(app_name, applications, keywords):
-                    logger.debug(f"App '{app_name}' matches rule, routing to {target_device}")
-                    if self._route_stream(app_name, target_device):
-                        routed_count += 1
+                    logger.debug(f"App '{app_name}' matches rule, routing to {target_devices[0]}")
+                    # Try each target device variant until one succeeds
+                    for target_device in target_devices:
+                        if self._route_stream(app_name, target_device):
+                            routed_count += 1
+                            break
                 else:
                     logger.debug(f"App '{app_name}' does NOT match rule")
             

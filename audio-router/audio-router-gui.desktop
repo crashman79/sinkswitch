@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=PipeWire Audio Router
+GenericName=Audio Router Control
+Comment=Configure automatic audio routing based on applications
+Exec=/home/crashman79/.config/pipewire-router/launch-gui.sh
+Icon=audio-card
+Terminal=false
+Categories=AudioVideo;Audio;Settings;
+Keywords=audio;sound;routing;pipewire;pulseaudio;
+StartupNotify=true
