@@ -31,6 +31,8 @@ class DeviceMonitor:
         self.devices = {}
         self.last_devices = {}
         self._detect_audio_backend()
+        self.bluetooth_devices_cache = {}  # Cache of Bluetooth device info
+        self.bluetooth_profile_state = {}  # Track Bluetooth device profiles
     
     def _detect_audio_backend(self):
         """Detect which audio backend is available (PipeWire or PulseAudio)"""
@@ -51,6 +53,149 @@ class DeviceMonitor:
             return self._get_pipewire_devices()
         else:
             return self._get_pulseaudio_devices()
+    
+    def get_bluetooth_card_info(self, device_address: str) -> Optional[Dict]:
+        """Get Bluetooth card profile information
+        
+        Args:
+            device_address: Bluetooth MAC address (e.g., 00:02:3C:AD:09:85)
+        
+        Returns:
+            Dictionary with card info including available profiles and active profile
+        """
+        try:
+            result = subprocess.run(
+                ['pactl', 'list', 'cards'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            cards = []
+            current_card = {}
+            in_profiles = False
+            
+            for line in result.stdout.split('\n'):
+                stripped = line.strip()
+                
+                if line.startswith('Card #'):
+                    if current_card:
+                        cards.append(current_card)
+                    current_card = {'profiles': {}}
+                    in_profiles = False
+                elif stripped.startswith('Name:'):
+                    current_card['name'] = stripped.split(':', 1)[1].strip()
+                elif 'api.bluez5.address' in stripped:
+                    addr = stripped.split('=', 1)[1].strip().strip('"')
+                    current_card['address'] = addr
+                elif stripped.startswith('Active Profile:'):
+                    current_card['active_profile'] = stripped.split(':', 1)[1].strip()
+                elif stripped == 'Profiles:':
+                    in_profiles = True
+                elif in_profiles:
+                    if stripped.startswith('Ports:'):
+                        in_profiles = False
+                    elif ':' in stripped and not stripped.startswith('Part of'):
+                        # Parse profile line: "a2dp-sink-sbc: High Fidelity Playback..."
+                        parts = stripped.split(':', 1)
+                        if len(parts) == 2:
+                            profile_name = parts[0].strip()
+                            profile_desc = parts[1].strip()
+                            current_card['profiles'][profile_name] = profile_desc
+            
+            if current_card:
+                cards.append(current_card)
+            
+            # Find matching card by address
+            for card in cards:
+                if card.get('address') == device_address:
+                    return card
+            
+            return None
+        except Exception as e:
+            logger.debug(f"Failed to get Bluetooth card info: {e}")
+            return None
+    
+    def get_all_bluetooth_sinks(self, device_address: str) -> List[str]:
+        """Get all sink names for a Bluetooth device (all profiles)
+        
+        Args:
+            device_address: Bluetooth MAC address without colons (e.g., 00_02_3C_AD_09_85)
+        
+        Returns:
+            List of sink names (e.g., ['bluez_output.00_02_3C_AD_09_85.1', 'bluez_output.00_02_3C_AD_09_85.2'])
+        """
+        try:
+            result = subprocess.run(
+                ['pactl', 'list', 'sinks', 'short'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            sinks = []
+            for line in result.stdout.split('\n'):
+                if device_address in line:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        sink_name = parts[1]
+                        sinks.append(sink_name)
+            
+            return sinks
+        except Exception as e:
+            logger.debug(f"Failed to get Bluetooth sinks: {e}")
+            return []
+    
+    def set_bluetooth_profile(self, card_name: str, profile: str) -> bool:
+        """Set Bluetooth card to specific profile
+        
+        Args:
+            card_name: Card name (e.g., 'bluez_card.00_02_3C_AD_09_85')
+            profile: Profile name (e.g., 'a2dp-sink', 'headset-head-unit')
+        
+        Returns:
+            True if profile was set successfully
+        """
+        try:
+            result = subprocess.run(
+                ['pactl', 'set-card-profile', card_name, profile],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=True
+            )
+            logger.info(f"Set card {card_name} to profile {profile}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set Bluetooth profile: {e}")
+            return False
+    
+    def prefer_a2dp_profile(self, device_address: str) -> bool:
+        """Force Bluetooth device to use A2DP (high-fidelity) profile if available
+        
+        Args:
+            device_address: Bluetooth MAC address with colons (e.g., '00:02:3C:AD:09:85')
+        
+        Returns:
+            True if A2DP profile was set successfully
+        """
+        card_info = self.get_bluetooth_card_info(device_address)
+        if not card_info:
+            return False
+        
+        # Check if already in A2DP profile
+        active_profile = card_info.get('active_profile', '')
+        if active_profile.startswith('a2dp'):
+            logger.debug(f"Already in A2DP profile: {active_profile}")
+            return True
+        
+        # Find best A2DP profile (prefer aptX > AAC > SBC-XQ > SBC)
+        a2dp_priority = ['a2dp-sink', 'a2dp-sink-aac', 'a2dp-sink-sbc_xq', 'a2dp-sink-sbc']
+        for profile in a2dp_priority:
+            if profile in card_info.get('profiles', {}):
+                return self.set_bluetooth_profile(card_info['name'], profile)
+        
+        return False
     
     def _get_pipewire_devices(self) -> List[Dict]:
         """Get devices using PipeWire"""
@@ -196,6 +341,9 @@ class DeviceMonitor:
             while True:
                 current_devices = self.get_devices()
                 
+                # Monitor Bluetooth profiles and restore A2DP when possible
+                self._monitor_bluetooth_profiles(current_devices)
+                
                 # Check if device list changed
                 if self._devices_changed(current_devices):
                     logger.info("Device configuration changed")
@@ -234,3 +382,86 @@ class DeviceMonitor:
                 return True
         
         return False
+    
+    def _monitor_bluetooth_profiles(self, current_devices: List[Dict]):
+        """Monitor Bluetooth device profiles and restore A2DP when HSP/HFP is no longer needed
+        
+        Args:
+            current_devices: List of current audio devices
+        """
+        try:
+            # Get all Bluetooth devices
+            for device in current_devices:
+                device_id = device.get('id', '')
+                if 'bluez' not in device_id:
+                    continue
+                
+                # Extract MAC address
+                parts = device_id.split('.')
+                if len(parts) < 3:
+                    continue
+                
+                device_address_underscore = parts[1]  # 00_02_3C_AD_09_85
+                device_address_colon = device_address_underscore.replace('_', ':')
+                
+                # Get current profile
+                card_info = self.get_bluetooth_card_info(device_address_colon)
+                if not card_info:
+                    continue
+                
+                active_profile = card_info.get('active_profile', '')
+                card_name = card_info.get('name', '')
+                
+                # Track profile changes
+                if device_address_underscore not in self.bluetooth_profile_state:
+                    self.bluetooth_profile_state[device_address_underscore] = {
+                        'last_profile': active_profile,
+                        'profile_switch_time': time.time()
+                    }
+                
+                last_profile = self.bluetooth_profile_state[device_address_underscore]['last_profile']
+                
+                # If profile changed from HSP/HFP to something else, no action needed
+                # If profile is currently HSP/HFP and has been for a while with no active streams, switch back to A2DP
+                if active_profile.startswith('headset'):
+                    # Check if there are any active input sources (microphone in use)
+                    has_active_mic = self._check_active_mic_streams()
+                    
+                    # If no mic is in use and we've been in headset mode for > 5 seconds, switch back to A2DP
+                    time_in_headset = time.time() - self.bluetooth_profile_state[device_address_underscore].get('profile_switch_time', 0)
+                    if not has_active_mic and time_in_headset > 5:
+                        logger.info(f"Restoring A2DP profile for {device_address_colon} (no active mic streams)")
+                        self.prefer_a2dp_profile(device_address_colon)
+                        self.bluetooth_profile_state[device_address_underscore]['profile_switch_time'] = time.time()
+                
+                # Update state
+                if active_profile != last_profile:
+                    logger.info(f"Bluetooth profile changed: {last_profile} -> {active_profile} for {device_address_colon}")
+                    self.bluetooth_profile_state[device_address_underscore] = {
+                        'last_profile': active_profile,
+                        'profile_switch_time': time.time()
+                    }
+        
+        except Exception as e:
+            logger.debug(f"Error monitoring Bluetooth profiles: {e}")
+    
+    def _check_active_mic_streams(self) -> bool:
+        """Check if there are any active microphone/source streams
+        
+        Returns:
+            True if there are active microphone streams
+        """
+        try:
+            result = subprocess.run(
+                ['pactl', 'list', 'source-outputs', 'short'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            # If there are any source outputs (mic streams), return True
+            return bool(result.stdout.strip())
+        
+        except Exception as e:
+            logger.debug(f"Failed to check mic streams: {e}")
+            return False

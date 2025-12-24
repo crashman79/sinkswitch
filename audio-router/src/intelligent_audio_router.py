@@ -173,10 +173,35 @@ class IntelligentAudioRouter:
                 device_type = priority_map.get(priority)
                 if device_type and device_type in device_map:
                     device = device_map[device_type][0]
+                    
+                    # For Bluetooth devices, get all profile sinks and prefer A2DP
+                    target_device = device['id']
+                    all_sinks = [target_device]
+                    
+                    if device_type == 'bluetooth':
+                        # Extract MAC address from device ID
+                        # Format: bluez_output.00_02_3C_AD_09_85.1
+                        if 'bluez' in target_device:
+                            parts = target_device.split('.')
+                            if len(parts) >= 3:
+                                device_address = parts[1]  # 00_02_3C_AD_09_85
+                                device_address_colon = device_address.replace('_', ':')  # 00:02:3C:AD:09:85
+                                
+                                # Get all sinks for this Bluetooth device
+                                all_sinks = self.device_monitor.get_all_bluetooth_sinks(device_address)
+                                if not all_sinks:
+                                    all_sinks = [target_device]
+                                
+                                # Force A2DP profile for high-fidelity audio
+                                self.device_monitor.prefer_a2dp_profile(device_address_colon)
+                                logger.info(f"Bluetooth device has {len(all_sinks)} sink(s): {all_sinks}")
+                    
+                    # Create rule with all sink variants
                     rule = {
                         'name': f"{category.title()} Apps to {device_type.replace('_', ' ').title()}",
                         'applications': self.APP_CATEGORIES.get(category, []),
-                        'target_device': device['id'],
+                        'target_device': target_device,
+                        'target_device_variants': all_sinks if len(all_sinks) > 1 else None,
                         'enable_default_fallback': True
                     }
                     config['routing_rules'].append(rule)
