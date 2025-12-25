@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 import os
+import yaml
 
 from config_parser import ConfigParser
 from device_monitor import DeviceMonitor
@@ -112,10 +113,42 @@ def monitor_devices(config_file: str):
         monitor = DeviceMonitor()
         engine = AudioRouterEngine()
         
+        def regenerate_and_reload_config():
+            """Regenerate config and reload rules"""
+            try:
+                logger.info("Regenerating routing configuration...")
+                router = IntelligentAudioRouter()
+                config = router.generate_routing_config()
+                
+                # Save config
+                config_path = Path(config_file).resolve()
+                config_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(config_path, 'w') as f:
+                    import yaml
+                    yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+                
+                logger.info(f"Config regenerated and saved to {config_path}")
+                
+                # Reload rules
+                nonlocal parser, rules
+                parser = ConfigParser(config_file)
+                rules = parser.parse()
+                logger.info(f"Loaded {len(rules)} routing rules")
+                
+                # Apply new rules immediately
+                engine.apply_rules(rules)
+                
+            except Exception as e:
+                logger.error(f"Failed to regenerate config: {e}")
+        
         print(f"Starting device monitoring with config: {config_file}")
+        print("Auto-regeneration enabled for bluetooth/USB device changes")
         print("Press Ctrl+C to stop\n")
         
-        monitor.watch_devices(lambda: engine.apply_rules(rules))
+        monitor.watch_devices(
+            lambda: engine.apply_rules(rules),
+            config_regen_callback=regenerate_and_reload_config
+        )
         
     except KeyboardInterrupt:
         print("\nMonitoring stopped")

@@ -33,6 +33,8 @@ class DeviceMonitor:
         self._detect_audio_backend()
         self.bluetooth_devices_cache = {}  # Cache of Bluetooth device info
         self.bluetooth_profile_state = {}  # Track Bluetooth device profiles
+        self.last_config_regeneration = 0  # Timestamp of last config regeneration
+        self.config_regeneration_cooldown = 10  # Minimum seconds between regenerations
     
     def _detect_audio_backend(self):
         """Detect which audio backend is available (PipeWire or PulseAudio)"""
@@ -328,14 +330,17 @@ class DeviceMonitor:
         device = self.get_device_by_name(device_id)
         return device is not None and device.get('connected', False)
     
-    def watch_devices(self, callback: Callable, interval: int = 5):
+    def watch_devices(self, callback: Callable, interval: int = 5, config_regen_callback: Optional[Callable] = None):
         """Watch for device changes and call callback when changes detected
         
         Args:
             callback: Function to call when devices change
             interval: Polling interval in seconds
+            config_regen_callback: Optional callback to regenerate config when significant devices change
         """
         logger.info(f"Starting device monitoring (interval: {interval}s)")
+        if config_regen_callback:
+            logger.info("Config auto-regeneration enabled for bluetooth/USB device changes")
         
         try:
             while True:
@@ -343,6 +348,20 @@ class DeviceMonitor:
                 
                 # Monitor Bluetooth profiles and restore A2DP when possible
                 self._monitor_bluetooth_profiles(current_devices)
+                
+                # Check for significant device changes (bluetooth/USB connecting/disconnecting)
+                if config_regen_callback and self._is_significant_device_change(current_devices):
+                    # Rate limit config regeneration
+                    time_since_last = time.time() - self.last_config_regeneration
+                    if time_since_last >= self.config_regeneration_cooldown:
+                        logger.info(f"Triggering config regeneration due to significant device change")
+                        try:
+                            config_regen_callback()
+                            self.last_config_regeneration = time.time()
+                        except Exception as e:
+                            logger.error(f"Failed to regenerate config: {e}")
+                    else:
+                        logger.debug(f"Skipping config regeneration (cooldown: {self.config_regeneration_cooldown - time_since_last:.1f}s remaining)")
                 
                 # Check if device list changed
                 if self._devices_changed(current_devices):
@@ -380,6 +399,37 @@ class DeviceMonitor:
             )
             if last_device and device.get('connected') != last_device.get('connected'):
                 return True
+        
+        return False
+    
+    def _is_significant_device_change(self, current_devices: List[Dict]) -> bool:
+        """Check if device changes are significant enough to trigger config regeneration
+        
+        Significant changes are:
+        - Bluetooth devices connecting/disconnecting
+        - USB headsets connecting/disconnecting
+        - Any device with 'bluez' or 'usb' in the ID
+        """
+        if not self.last_devices:
+            return False
+        
+        current_ids = {d['id'] for d in current_devices}
+        last_ids = {d['id'] for d in self.last_devices}
+        
+        # Check for new or removed devices
+        added = current_ids - last_ids
+        removed = last_ids - current_ids
+        
+        # Filter to only significant device types
+        def is_significant(device_id: str) -> bool:
+            return 'bluez' in device_id.lower() or 'usb' in device_id.lower()
+        
+        significant_added = any(is_significant(d) for d in added)
+        significant_removed = any(is_significant(d) for d in removed)
+        
+        if significant_added or significant_removed:
+            logger.info(f"Significant device change detected - Added: {[d for d in added if is_significant(d)]}, Removed: {[d for d in removed if is_significant(d)]}")
+            return True
         
         return False
     
