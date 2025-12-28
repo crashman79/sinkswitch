@@ -299,6 +299,8 @@ class AudioRouterEngine:
     def _get_sink_number(self, device_name: str) -> Optional[str]:
         """Convert device name to sink number
         
+        For Bluetooth devices, matches by MAC address even if suffix differs.
+        
         Args:
             device_name: Device name (e.g., alsa_output.pci-0000_0e_00.4.analog-stereo)
             
@@ -320,8 +322,22 @@ class AudioRouterEngine:
                 elif 'Name:' in line:
                     # Extract the name value
                     name_value = line.split('Name:')[1].strip()
+                    
+                    # Try exact match first
                     if device_name in line or name_value == device_name:
                         return current_sink_id
+                    
+                    # For Bluetooth devices, try fuzzy matching by MAC address
+                    if 'bluez' in device_name.lower() and 'bluez' in name_value.lower():
+                        # Extract MAC address from requested device name
+                        parts = device_name.split('.')
+                        if len(parts) >= 2:
+                            mac_address = parts[1]
+                            # Check if this sink has the same MAC address
+                            if mac_address in name_value:
+                                logger.debug(f"Fuzzy matched Bluetooth sink '{device_name}' to '{name_value}' (sink #{current_sink_id})")
+                                return current_sink_id
+            
             return None
         except Exception as e:
             logger.debug(f"Failed to get sink number for {device_name}: {e}")

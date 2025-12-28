@@ -318,11 +318,34 @@ class DeviceMonitor:
         return None
     
     def get_device_by_name(self, name: str) -> Optional[Dict]:
-        """Get a device by name"""
+        """Get a device by name or by Bluetooth MAC address prefix
+        
+        For Bluetooth devices, matches by MAC address even if suffix differs.
+        E.g., 'bluez_output.00_02_3C_AD_09_85.1' matches 'bluez_output.00_02_3C_AD_09_85.2'
+        """
         devices = self.get_devices()
+        
+        # First try exact match
         for device in devices:
             if device['name'] == name or device['id'] == name:
                 return device
+        
+        # For Bluetooth devices, try fuzzy matching by MAC address
+        if 'bluez' in name.lower():
+            # Extract MAC address from the requested name
+            # Format: bluez_output.00_02_3C_AD_09_85.1 or bluez_card.00_02_3C_AD_09_85
+            parts = name.split('.')
+            if len(parts) >= 2:
+                # Get the MAC address part (second component)
+                mac_address = parts[1]
+                
+                # Find any device with matching MAC address
+                for device in devices:
+                    device_id = device.get('id', '')
+                    if 'bluez' in device_id.lower() and mac_address in device_id:
+                        logger.debug(f"Fuzzy matched Bluetooth device '{name}' to '{device_id}'")
+                        return device
+        
         return None
     
     def device_connected(self, device_id: str) -> bool:
