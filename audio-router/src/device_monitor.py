@@ -30,6 +30,7 @@ class DeviceMonitor:
     def __init__(self):
         self.devices = {}
         self.last_devices = {}
+        self.last_streams = []  # Track audio streams
         self._detect_audio_backend()
         self.bluetooth_devices_cache = {}  # Cache of Bluetooth device info
         self.bluetooth_profile_state = {}  # Track Bluetooth device profiles
@@ -368,6 +369,7 @@ class DeviceMonitor:
         try:
             while True:
                 current_devices = self.get_devices()
+                current_streams = self._get_audio_streams()
                 
                 # Monitor Bluetooth profiles and restore A2DP when possible
                 self._monitor_bluetooth_profiles(current_devices)
@@ -386,11 +388,21 @@ class DeviceMonitor:
                     else:
                         logger.debug(f"Skipping config regeneration (cooldown: {self.config_regeneration_cooldown - time_since_last:.1f}s remaining)")
                 
-                # Check if device list changed
-                if self._devices_changed(current_devices):
-                    logger.info("Device configuration changed")
-                    callback()
+                # Check if device list or audio streams changed
+                device_changed = self._devices_changed(current_devices)
+                stream_changed = self._streams_changed(current_streams)
+                
+                if device_changed or stream_changed:
+                    if device_changed and stream_changed:
+                        logger.info("Devices and audio streams changed - applying routing rules")
+                    elif device_changed:
+                        logger.info("Device configuration changed - applying routing rules")
+                    else:
+                        logger.info("Audio streams changed - applying routing rules")
+                    
                     self.last_devices = current_devices
+                    self.last_streams = current_streams
+                    callback()
                 
                 time.sleep(interval)
         
@@ -424,6 +436,62 @@ class DeviceMonitor:
                 return True
         
         return False
+    
+    def _get_audio_streams(self) -> List[Dict]:
+        """Get list of active audio streams (sink-inputs)
+        
+        Returns:
+            List of stream dictionaries with 'index' and 'application_name'
+        """
+        try:
+            result = subprocess.run(
+                ['pactl', 'list', 'sink-inputs'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            streams = []
+            current_stream = {}
+            
+            for line in result.stdout.split('\n'):
+                line = line.strip()
+                
+                if line.startswith('Sink Input #'):
+                    if current_stream:
+                        streams.append(current_stream)
+                    current_stream = {'index': line.split('#')[1]}
+                elif 'application.name' in line and '=' in line:
+                    app_name = line.split('=')[1].strip().strip('"')
+                    current_stream['application_name'] = app_name
+            
+            # Add last stream
+            if current_stream and 'application_name' in current_stream:
+                streams.append(current_stream)
+            
+            return streams
+            
+        except Exception as e:
+            logger.debug(f"Failed to get audio streams: {e}")
+            return []
+    
+    def _streams_changed(self, current_streams: List[Dict]) -> bool:
+        """Check if audio streams have changed
+        
+        Args:
+            current_streams: List of current audio streams
+            
+        Returns:
+            True if streams changed (new stream, removed stream, or app changed)
+        """
+        if len(current_streams) != len(self.last_streams):
+            return True
+        
+        # Compare stream application names
+        current_apps = sorted([s.get('application_name', '') for s in current_streams])
+        last_apps = sorted([s.get('application_name', '') for s in self.last_streams])
+        
+        return current_apps != last_apps
     
     def _is_significant_device_change(self, current_devices: List[Dict]) -> bool:
         """Check if device changes are significant enough to trigger config regeneration
