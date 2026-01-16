@@ -58,7 +58,7 @@ class IntelligentAudioRouter:
     APP_CATEGORIES = {
         'browsers': ['firefox', 'chrome', 'chromium', 'opera', 'edge', 'brave', 'vivaldi'],
         'meetings': ['zoom', 'teams', 'meet', 'discord', 'skype', 'slack'],
-        'music': ['spotify', 'vlc', 'rhythmbox', 'cmus', 'mpv', 'audacious'],
+        'media': ['spotify', 'vlc', 'rhythmbox', 'cmus', 'mpv', 'audacious', 'plex'],
         'games': ['steam', 'lutris', 'wine', 'proton', 'wow', 'world of warcraft'],
     }
     
@@ -66,7 +66,7 @@ class IntelligentAudioRouter:
     ROUTING_PRIORITIES = {
         'browsers': ['bluetooth_earbuds', 'usb_headset', 'default'],
         'meetings': ['bluetooth_earbuds', 'usb_headset', 'default'],
-        'music': ['bluetooth_earbuds', 'usb_headset', 'default'],
+        'media': ['bluetooth_earbuds', 'usb_headset', 'default'],
         'games': ['default'],  # Use whatever is default
     }
     

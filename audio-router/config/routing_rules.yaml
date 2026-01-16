@@ -22,7 +22,7 @@ routing_rules:
   target_device: bluez_output.00_02_3C_AD_09_85.1
   target_device_variants: null
   enable_default_fallback: true
-- name: Music Apps to Bluetooth
+- name: Media Apps to Bluetooth
   applications:
   - spotify
   - vlc
@@ -30,6 +30,7 @@ routing_rules:
   - cmus
   - mpv
   - audacious
+  - plex
   target_device: bluez_output.00_02_3C_AD_09_85.1
   target_device_variants: null
   enable_default_fallback: true

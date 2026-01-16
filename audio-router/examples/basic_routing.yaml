@@ -31,11 +31,12 @@ routing_rules:
     target_device: "bluez_output.XX_XX_XX_XX_XX_XX.1"
     enable_default_fallback: true
 
-  # Example: Route music to Bluetooth speaker
-  - name: "Music Apps to Bluetooth"
+  # Example: Route media apps to Bluetooth speaker
+  - name: "Media Apps to Bluetooth"
     applications:
       - "spotify"
       - "vlc"
       - "rhythmbox"
+      - "plex"
     target_device: "bluez_output.XX_XX_XX_XX_XX_XX.1"
     enable_default_fallback: true

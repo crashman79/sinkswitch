@@ -30,8 +30,8 @@ routing_rules:
     target_device: "bluez_output.XX_XX_XX_XX_XX_XX.1"
     enable_default_fallback: true
 
-  # Example: Route music players to Bluetooth speaker
-  - name: "Music Apps to Bluetooth Speaker"
+  # Example: Route media players to Bluetooth speaker
+  - name: "Media Apps to Bluetooth Speaker"
     applications:
       - "spotify"
       - "vlc"
@@ -39,6 +39,7 @@ routing_rules:
       - "cmus"
       - "mpv"
       - "audacious"
+      - "plex"
     target_device: "bluez_output.XX_XX_XX_XX_XX_XX.1"
     enable_default_fallback: true
 
