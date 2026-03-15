@@ -1,60 +1,38 @@
-# PipeWire Audio Tools
+# PipeWire Audio Router
 
-A collection of utilities for PipeWire/PulseAudio audio management on Linux.
+Route application audio to different outputs (Bluetooth, USB, HDMI, etc.) by rule. Runs as a standalone GUI on Linux with PipeWire or PulseAudio.
 
-## Projects
+**What it does:** Pick a default output, then define rules so specific apps (browsers, meetings, music players) always use the device you choose. The router runs inside the app—use **Start** / **Stop** in the toolbar. You see active streams, which rule applies, and can close to tray or launch at login.
 
-### [Audio Router](./audio-router/)
-Standalone app: automatic audio stream routing by application and connected devices. Routes applications to specific outputs (Bluetooth, USB, HDMI, etc.) via a GUI—no systemd or install script required.
+## Install and run
 
-**Status**: ✅ Production-ready
+1. **Download** the Linux binary from [Releases](https://github.com/crashman79/bluetooth-audio-router/releases).
+2. **Run** it (e.g. `chmod +x pipewire-audio-router && ./pipewire-audio-router`).
+3. On first run the app creates config at `~/.config/pipewire-router/`. Use the GUI to add routing rules and start the router. **Settings** → Add to application menu or launch at login if you like.
 
-## Quick Start (recommended)
+## Run from source
 
 ```bash
 cd audio-router
-pip install -r requirements.txt   # once: PyQt6, PyYAML, dbus-python
+pip install -r requirements.txt
 python3 run_app.py
 ```
 
-Config is created on first run at `~/.config/pipewire-router/`. Use the GUI to edit rules, start/stop the router, and optionally **Settings → Add to application menu** or **Launch app at login**.
+Same config and behavior; config dir is `~/.config/pipewire-router/` (or set `AUDIO_ROUTER_CONFIG`).
 
-To build a single executable: `./build.sh` → run `./dist/pipewire-audio-router`.
-
-## Optional: install script and systemd
-
-For a traditional install under `~/.config/pipewire-router` with a systemd user service:
+### Build the binary yourself
 
 ```bash
 cd audio-router
-./install.sh
-systemctl --user start pipewire-router
-systemctl --user enable pipewire-router
-```
-
-See [audio-router/README.md](./audio-router/README.md) for details.
-
-## Project Structure
-
-```
-.
-├── audio-router/           # Standalone audio routing app
-│   ├── src/                # Python source
-│   ├── run_app.py          # Standalone launcher (no install required)
-│   ├── build.sh            # Build single binary (PyInstaller)
-│   ├── run_app.spec        # PyInstaller spec
-│   ├── config/             # Example/default config
-│   ├── systemd/            # Optional systemd service
-│   ├── install.sh          # Optional install script
-│   └── README.md
-└── README.md
+./build.sh
+./dist/pipewire-audio-router
 ```
 
 ## Requirements
 
 - Linux with PipeWire or PulseAudio
-- Python 3.8+ (or use the built binary from `build.sh`)
-- PyQt6 for the GUI
+- For the release binary: desktop and glibc
+- For source: Python 3.8+, PyQt6
 
 ## License
 
