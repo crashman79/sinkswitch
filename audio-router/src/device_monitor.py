@@ -46,10 +46,10 @@ class DeviceMonitor:
                           check=False,
                           timeout=2)
             self.backend = 'pipewire'
-            logger.info("Detected PipeWire audio backend")
+            logger.debug("Detected PipeWire audio backend")
         except FileNotFoundError:
             self.backend = 'pulseaudio'
-            logger.info("Detected PulseAudio audio backend")
+            logger.debug("Detected PulseAudio audio backend")
     
     def get_devices(self) -> List[Dict]:
         """Get list of available audio output devices"""
@@ -57,6 +57,31 @@ class DeviceMonitor:
             return self._get_pipewire_devices()
         else:
             return self._get_pulseaudio_devices()
+
+    def get_default_sink(self) -> Optional[str]:
+        """Return the current default sink name (where unmatched audio goes), or None."""
+        try:
+            r = subprocess.run(
+                ['pactl', 'get-default-sink'],
+                capture_output=True, text=True, timeout=2
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except Exception as e:
+            logger.debug(f"get_default_sink: {e}")
+        return None
+
+    def set_default_sink(self, sink_name: str) -> bool:
+        """Set the default sink (fallback for unmatched streams). Returns True on success."""
+        try:
+            r = subprocess.run(
+                ['pactl', 'set-default-sink', sink_name],
+                capture_output=True, text=True, timeout=2
+            )
+            return r.returncode == 0
+        except Exception as e:
+            logger.debug(f"set_default_sink: {e}")
+            return False
     
     def get_bluetooth_card_info(self, device_address: str) -> Optional[Dict]:
         """Get Bluetooth card profile information

@@ -1,0 +1,54 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build binary
+        run: |
+          cd audio-router
+          python3 -m venv .venv-build
+          .venv-build/bin/pip install -q pyinstaller
+          .venv-build/bin/pip install -q -r requirements.txt
+          .venv-build/bin/python -m PyInstaller run_app.spec
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipewire-audio-router-linux-x64
+          path: audio-router/dist/pipewire-audio-router
+
+  release:
+    needs: build-linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pipewire-audio-router-linux-x64
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pipewire-audio-router
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

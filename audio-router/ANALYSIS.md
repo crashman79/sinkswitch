@@ -1,38 +1,27 @@
-# Audio Router: Service → App Conversion
+# Audio Router: Design Overview
 
-## Current State
+## Current Design (Standalone App)
 
-- **Router**: `audio_router.py monitor <config>` runs a polling loop (`DeviceMonitor.watch_devices`) that applies routing rules on device/stream changes and can regenerate config on Bluetooth/USB changes.
-- **Service**: systemd user unit runs that process; `install.sh` installs to `~/.config/pipewire-router/` and `~/.config/systemd/user/pipewire-router.service`.
-- **GUI** (`audio_router_gui.py`): PyQt6 window with Devices, Routing Rules, Active Streams, Logs; Start/Stop/Restart control the **systemd service** only.
-- **Tray** (`tray_icon.py`): Tray icon with pause/resume (systemctl stop/start), regenerate config, view logs.
+The app is a **standalone graphical application**. No install script or systemd is required for normal use.
 
-## Goal
+- **Entry point**: `run_app.py` (script) or `dist/pipewire-audio-router` (PyInstaller binary from `build.sh`).
+- **Config**: `~/.config/pipewire-router/` (or `AUDIO_ROUTER_CONFIG`). Created on first run; `config/routing_rules.yaml` is bootstrapped if missing.
+- **Router**: Runs inside the app in a background thread (`MonitorThread`). Start/Stop/Restart in the GUI control this thread. No systemd.
+- **GUI** (`audio_router_gui.py`): Devices (friendly names), Routing rules, Active streams (real app names from pactl), Logs (in-app buffer), Settings.
+- **Settings**: Start on login (None / Launch app at login via XDG Autostart), Start routing when app opens, Close to tray, Add to application menu.
+- **Tray**: Integrated system tray when available: Show, Start/Stop router, Quit. With "Close to tray", closing the window hides to tray; app quits only via tray Quit or when close-to-tray is off.
+- **Friendly names**: `device_monitor` enriches each device with `device_type` and `friendly_name` (from pactl description or derived from id).
 
-- **App-first**: Single graphical app as main entry point, with configuration and status.
-- **Run modes**:
-  1. **Run in app** – Router runs inside the app (background thread). No systemd required.
-  2. **Use systemd** – Keep current behavior; GUI/tray only control the service.
-- **Start on login** (multiple methods for different Linux DEs):
-  1. **None** – Manual start.
-  2. **Launch app at login** – XDG Autostart (`.desktop` in `~/.config/autostart/`). Works on GNOME, KDE, XFCE, MATE, LXDE, etc.
-  3. **Start router with systemd at session start** – `systemctl --user enable pipewire-router` (runs monitor at user session start, no GUI required).
+## Optional: install.sh and systemd
 
-## Implementation Summary
+Running `./install.sh` copies files to `~/.config/pipewire-router/`, creates a venv, and installs a systemd user service. Useful if you want the router to run at session start without the GUI. The standalone app does not depend on it.
 
-| Item | Action |
-|------|--------|
-| `device_monitor.py` | Add optional `stop_event` to `watch_devices()` so the loop can be stopped from a QThread. |
-| GUI | Add **Settings** tab: run mode (Run in app / Use systemd), start-on-login (None / Launch app at login / Systemd at session start). Persist in `~/.config/pipewire-router/app_settings.json`. |
-| GUI | When "Run in app": Start/Stop start/stop an in-app monitor thread (using existing config + regen callback). When "Use systemd": keep current systemctl start/stop. |
-| Autostart | "Launch app at login" = add/remove a `.desktop` in `~/.config/autostart/` that runs the app (e.g. `launch-gui.sh` or a new `launch-app.sh`). Option: "Start routing when app opens" so routing begins automatically. |
-| Install | Install script: still install systemd unit (for "systemd at session" option); install one app `.desktop` for menu + optional autostart; document app-first usage. |
+## Key Files
 
-## Files to Add/Change
-
-- `ANALYSIS.md` (this file)
-- `src/device_monitor.py` – optional `stop_event` in `watch_devices`
-- `src/audio_router_gui.py` – Settings tab, in-app monitor thread, autostart read/write
-- `config/app_settings.json` (generated) – run_mode, start_on_login, start_routing_on_launch
-- `audio-router-app.desktop` – single desktop entry for app (menu + copy to autostart when "Launch app at login")
-- `install.sh` – install app desktop; mention app-first flow
+| File | Purpose |
+|------|---------|
+| `run_app.py` | Launcher: sets path/env, bootstraps config, runs GUI. Works frozen (binary) or as script. |
+| `run_app.spec` | PyInstaller spec; build via `build.sh` (uses .venv-build, installs deps + pyinstaller). |
+| `src/audio_router_gui.py` | Main window, tray, in-app monitor thread, Settings (autostart, close-to-tray, app menu). |
+| `src/device_monitor.py` | Device list, `watch_devices()` with optional `stop_event`; `_enrich_device()` adds friendly_name/device_type. |
+| `~/.config/pipewire-router/app_settings.json` | Persisted settings: start_on_login, start_routing_on_launch, close_to_tray. |

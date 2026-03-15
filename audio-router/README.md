@@ -30,22 +30,20 @@ python3 run_app.py
 
 On first run the app creates `~/.config/pipewire-router/config/routing_rules.yaml` (and can auto-generate rules from connected devices). Use the GUI to adjust rules, start/stop the router, and optionally enable “Launch app at login” in Settings.
 
-**GUI:** Devices, Routing rules, Active streams, Logs, Settings (start on login, auto-start routing, **Add to application menu**).
+**GUI:** Devices (with friendly names), Routing rules, Active streams (real application names), Logs, Settings (start on login, auto-start routing, close to tray, **Add to application menu**). Start/Stop/Restart buttons are enabled only when applicable. Optional system tray: Show, Start/Stop router, Quit; with "Close to tray" the window hides to the tray instead of exiting.
 
 ### Launch without a terminal
 
-- **Application menu:** In the app, open **Settings** → **Add to application menu**. The app will appear in your app launcher (e.g. GNOME/KDE menu) so you can start it without a terminal.
-- **Single binary:** Build a standalone executable and run it (or move it to your PATH):
+- **Application menu:** **Settings** → **Add to application menu**. The app appears in your app launcher (GNOME/KDE/XFCE etc.).
+- **Single binary:** Build once, run anywhere:
 
 ```bash
 cd audio-router
-pip install pyinstaller
-./build.sh
-# Binary: dist/pipewire-audio-router
+./build.sh   # uses a venv, no system pip needed
 ./dist/pipewire-audio-router
 ```
 
-You can move `dist/pipewire-audio-router` anywhere and run it directly; config is still in `~/.config/pipewire-router/`.
+Move `dist/pipewire-audio-router` anywhere; config stays in `~/.config/pipewire-router/`.
 
 ## Command Line Usage
 

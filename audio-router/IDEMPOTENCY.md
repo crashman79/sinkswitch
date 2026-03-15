@@ -105,10 +105,8 @@ Your hardware setup (one of each type) is ideal for automatic generation:
 3. No manual intervention needed
 4. Fully reproducible and idempotent
 
-For automated systemd startup, you could even add a pre-startup hook in the service:
-```ini
-ExecStartPre=%h/.config/pipewire-router/src/audio_router.py generate-config
-ExecStart=%h/.config/pipewire-router/src/audio_router.py monitor %h/.config/pipewire-router/config/routing_rules.yaml
-```
+The same generation logic is used by:
+- The **standalone app** when it bootstraps config on first run and when the in-app monitor auto-regenerates on device changes.
+- The **optional systemd service** (install.sh) via ExecStartPre before monitor starts.
 
-This ensures config is always fresh on service start.
+So idempotency applies whether you use the app or the service.
