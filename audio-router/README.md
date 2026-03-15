@@ -1,82 +1,49 @@
-# PipeWire/PulseAudio Audio Router
+# PipeWire Audio Router (source)
 
-Standalone app: automatic audio stream routing by application and connected devices. No install script or systemd required.
+This folder contains the source and build files for PipeWire Audio Router. For install and run instructions, see the [root README](../README.md).
 
-## Features
-
-- **Standalone app** – Run from project directory; config created on first run at `~/.config/pipewire-router/`
-- **Intelligent routing** – Routes audio by application type (browsers, meetings, media) to chosen outputs
-- **Device detection** – USB headsets, Bluetooth, HDMI, analog speakers
-- **GUI** – Configure rules, see devices and streams, start/stop router, optional “launch at login”
-- **PipeWire & PulseAudio** – Works with both backends
-
-## Supported Browsers
-
-- Firefox
-- Chrome/Chromium
-- Opera
-- Edge
-- Brave
-- Vivaldi
-
-## Quick Start (standalone)
-
-**Requirements:** Python 3.8+, PyQt6, PyYAML (and `dbus-python` for Bluetooth). Example: `pip install -r requirements.txt`
+## Run from source
 
 ```bash
-cd audio-router
+pip install -r requirements.txt
 python3 run_app.py
 ```
 
-On first run the app creates `~/.config/pipewire-router/config/routing_rules.yaml` (and can auto-generate rules from connected devices). Use the GUI to adjust rules, start/stop the router, and optionally enable “Launch app at login” in Settings.
-
-**GUI:** Devices (with friendly names), Routing rules, Active streams (real application names), Logs, Settings (start on login, auto-start routing, close to tray, **Add to application menu**). Start/Stop/Restart buttons are enabled only when applicable. Optional system tray: Show, Start/Stop router, Quit; with "Close to tray" the window hides to the tray instead of exiting.
-
-### Launch without a terminal
-
-- **Application menu:** **Settings** → **Add to application menu**. The app appears in your app launcher (GNOME/KDE/XFCE etc.).
-- **Single binary:** Build once, run anywhere:
+## Build standalone binary
 
 ```bash
-cd audio-router
-./build.sh   # uses a venv, no system pip needed
+./build.sh
 ./dist/pipewire-audio-router
 ```
 
-Move `dist/pipewire-audio-router` anywhere; config stays in `~/.config/pipewire-router/`.
+## Config and rules
 
-## Command Line Usage
+- **Config dir**: `~/.config/pipewire-router/` (or `AUDIO_ROUTER_CONFIG`)
+- **Rules file**: `config/routing_rules.yaml`
 
-```bash
-# Auto-generate routing rules based on connected devices
-python3 src/audio_router.py generate-config
-
-# List available devices
-python3 src/audio_router.py list-devices
-
-# Apply routing rules once
-python3 src/audio_router.py apply-rules config/routing_rules.yaml
-
-# Monitor and apply rules continuously
-python3 src/audio_router.py monitor config/routing_rules.yaml
-```
-
-## Configuration
-
-Routing rules are defined in YAML format in `config/routing_rules.yaml`:
+Example:
 
 ```yaml
 routing_rules:
-  - name: "Browser to USB Headset"
+  - name: "Browsers to headset"
     applications:
       - "firefox"
       - "chrome"
-    application_keywords:
-      - "browser"
-    target_device: "USB Headset"
+    target_device: "bluez_output.XX_XX_XX_XX_XX_XX.1"   # sink name from Devices tab
     enable_default_fallback: true
 ```
 
-## Optional: install script and systemd
+Use the GUI to add rules and pick devices; the **Default output** in the toolbar is where unmatched apps go.
 
-For a system-wide install under `~/.config/pipewire-router` and a systemd user service, run `./install.sh`. The standalone app does not require it.
+## CLI (when running from source)
+
+From the `audio-router` directory with deps installed:
+
+```bash
+python3 src/audio_router.py list-devices
+python3 src/audio_router.py generate-config --output config/routing_rules.yaml
+python3 src/audio_router.py apply-rules config/routing_rules.yaml
+python3 src/audio_router.py monitor config/routing_rules.yaml
+```
+
+The GUI runs the monitor internally; these are for scripting or debugging.
