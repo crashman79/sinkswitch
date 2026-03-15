@@ -17,6 +17,9 @@ import yaml
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+# Bump when tagging a release
+__version__ = "0.5.0"
+
 # Config base: set by run_app.py or default
 def _config_base() -> Path:
     p = os.environ.get("AUDIO_ROUTER_CONFIG")
@@ -436,24 +439,35 @@ class AudioRouterGUI(QMainWindow):
         self.tray_icon: Optional[QSystemTrayIcon] = None
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
-        # Parent to app so icon stays when window is hidden
         self.tray_icon = QSystemTrayIcon(QApplication.instance())
         self.tray_icon.setIcon(self._tray_icon_pixmap())
         self.tray_icon.setToolTip("PipeWire Audio Router")
-        menu = QMenu()
-        show_act = menu.addAction("Show")
+        self.tray_menu = QMenu()
+        show_act = self.tray_menu.addAction("Show")
         show_act.triggered.connect(self._show_from_tray)
-        menu.addSeparator()
-        start_act = menu.addAction("▶ Start router")
-        start_act.triggered.connect(self.start_service)
-        stop_act = menu.addAction("⏸ Stop router")
-        stop_act.triggered.connect(self.stop_service)
-        menu.addSeparator()
-        quit_act = menu.addAction("Quit")
+        self.tray_menu.addSeparator()
+        self.tray_start_act = self.tray_menu.addAction("▶ Start router")
+        self.tray_start_act.triggered.connect(self.start_service)
+        self.tray_stop_act = self.tray_menu.addAction("⏸ Stop router")
+        self.tray_stop_act.triggered.connect(self.stop_service)
+        self.tray_restart_act = self.tray_menu.addAction("🔄 Restart router")
+        self.tray_restart_act.triggered.connect(self.restart_service)
+        self.tray_menu.addSeparator()
+        quit_act = self.tray_menu.addAction("Quit")
         quit_act.triggered.connect(self._quit_from_tray)
-        self.tray_icon.setContextMenu(menu)
+        self.tray_menu.aboutToShow.connect(self._update_tray_menu_state)
+        self.tray_icon.setContextMenu(self.tray_menu)
         self.tray_icon.activated.connect(self._on_tray_activated)
         self.tray_icon.show()
+
+    def _update_tray_menu_state(self):
+        """Set Start/Stop/Restart enabled based on router state."""
+        if not hasattr(self, 'tray_start_act'):
+            return
+        running = self._router_running()
+        self.tray_start_act.setEnabled(not running)
+        self.tray_stop_act.setEnabled(running)
+        self.tray_restart_act.setEnabled(running)
 
     def _tray_icon_pixmap(self) -> QIcon:
         size = QSize(22, 22)
@@ -495,7 +509,8 @@ class AudioRouterGUI(QMainWindow):
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle("PipeWire Audio Router")
-        self.setMinimumSize(1000, 700)
+        self.setMinimumSize(960, 560)
+        self.resize(1000, 620)
         
         # Central widget
         central_widget = QWidget()
@@ -508,10 +523,20 @@ class AudioRouterGUI(QMainWindow):
         # Top toolbar
         toolbar_layout = QHBoxLayout()
         
-        # Service status indicator
-        self.status_label = QLabel("Service: Unknown")
+        # Router status
+        self.status_label = QLabel("Router: Unknown")
         self.status_label.setStyleSheet("font-weight: bold; padding: 5px;")
         toolbar_layout.addWidget(self.status_label)
+        
+        toolbar_layout.addSpacing(20)
+        
+        # Default (fallback) output: where unmatched audio goes
+        toolbar_layout.addWidget(QLabel("Default output:"))
+        self.default_sink_combo = QComboBox()
+        self.default_sink_combo.setMinimumWidth(200)
+        self.default_sink_combo.setToolTip("Sink used for apps that don't match any rule. New streams go here.")
+        self.default_sink_combo.currentIndexChanged.connect(self._on_default_sink_changed)
+        toolbar_layout.addWidget(self.default_sink_combo)
         
         toolbar_layout.addStretch()
         
@@ -550,9 +575,13 @@ class AudioRouterGUI(QMainWindow):
         logs_tab = self.create_logs_tab()
         tabs.addTab(logs_tab, "📋 Logs")
 
-        # Tab 5: Settings (run mode, start on login)
+        # Tab 5: Settings
         settings_tab = self.create_settings_tab()
         tabs.addTab(settings_tab, "⚙️ Settings")
+
+        # Tab 6: About
+        about_tab = self.create_about_tab()
+        tabs.addTab(about_tab, "ℹ️ About")
 
         # Status bar
         self.statusBar().showMessage("Ready")
@@ -573,7 +602,11 @@ class AudioRouterGUI(QMainWindow):
         self.devices_table.setColumnCount(4)
         self.devices_table.setHorizontalHeaderLabels(['Status', 'Name', 'Type', 'Device ID'])
         self.devices_table.setToolTip("Name = friendly name; Device ID = internal sink name used for routing")
-        self.devices_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.devices_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.devices_table.setColumnWidth(0, 56)
+        self.devices_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.devices_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.devices_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.devices_table.setAlternatingRowColors(True)
         self.devices_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         layout.addWidget(self.devices_table)
@@ -636,7 +669,8 @@ class AudioRouterGUI(QMainWindow):
         # Streams table
         self.streams_table = QTableWidget()
         self.streams_table.setColumnCount(3)
-        self.streams_table.setHorizontalHeaderLabels(['Application', 'Current Output', 'Volume'])
+        self.streams_table.setHorizontalHeaderLabels(['Application', 'Output device', 'Route'])
+        self.streams_table.setToolTip("Route = matching rule name, or Default when no rule applies")
         self.streams_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.streams_table.setAlternatingRowColors(True)
         self.streams_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -702,14 +736,39 @@ class AudioRouterGUI(QMainWindow):
         self.close_to_tray_check.setToolTip("When enabled, closing the window hides the app to the tray; use tray menu to Show or Quit.")
         layout.addWidget(self.close_to_tray_check)
 
+        btn_row = QHBoxLayout()
         shortcut_btn = QPushButton("Add to application menu")
         shortcut_btn.setToolTip("Adds a launcher to your application menu (e.g. GNOME/KDE app grid) so you can start the app without a terminal.")
+        shortcut_btn.setMaximumWidth(220)
         shortcut_btn.clicked.connect(self._on_create_app_menu_shortcut)
-        layout.addWidget(shortcut_btn)
-
+        btn_row.addWidget(shortcut_btn)
         apply_btn = QPushButton("Apply and save")
+        apply_btn.setMaximumWidth(140)
         apply_btn.clicked.connect(self.apply_settings)
-        layout.addWidget(apply_btn)
+        btn_row.addWidget(apply_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+        layout.addStretch()
+        return widget
+
+    def create_about_tab(self) -> QWidget:
+        """Create the About tab with version, technology, and stats."""
+        widget = QWidget()
+        layout = QVBoxLayout()
+        widget.setLayout(layout)
+        layout.addWidget(QLabel("<b>PipeWire Audio Router</b>"))
+        layout.addWidget(QLabel(f"Version {__version__}"))
+        layout.addSpacing(12)
+        layout.addWidget(QLabel("<b>Technology</b>"))
+        layout.addWidget(QLabel("• Python 3, PyQt6 (GUI)"))
+        layout.addWidget(QLabel("• PipeWire / PulseAudio (pactl)"))
+        layout.addWidget(QLabel("• YAML config, XDG autostart"))
+        layout.addSpacing(8)
+        layout.addWidget(QLabel("<b>Paths</b>"))
+        layout.addWidget(QLabel(f"Config: {self.config_base}"))
+        layout.addWidget(QLabel(f"Rules: {self.config_file}"))
+        layout.addSpacing(8)
+        layout.addWidget(QLabel(f"<b>Routing rules</b>: {len(self.rules)}"))
         layout.addStretch()
         return widget
 
@@ -767,11 +826,40 @@ class AudioRouterGUI(QMainWindow):
         self.status_timer.timeout.connect(self.update_service_status)
         self.status_timer.start(3000)  # Update every 3 seconds
     
+    def _refresh_default_sink_combo(self):
+        """Refresh default-sink dropdown from current devices and pactl default."""
+        self.default_sink_combo.blockSignals(True)
+        self.default_sink_combo.clear()
+        try:
+            default_id = DeviceMonitor().get_default_sink()
+        except Exception:
+            default_id = None
+        for d in self.devices:
+            friendly = d.get('friendly_name') or d.get('name') or d.get('id', '')
+            self.default_sink_combo.addItem(friendly, d['id'])
+        idx = next((i for i in range(self.default_sink_combo.count()) if self.default_sink_combo.itemData(i) == default_id), 0)
+        self.default_sink_combo.setCurrentIndex(idx)
+        self.default_sink_combo.blockSignals(False)
+
+    def _on_default_sink_changed(self):
+        """User selected a new default (fallback) output; restart router to reapply rules immediately."""
+        sink_id = self.default_sink_combo.currentData()
+        if not sink_id:
+            return
+        if not DeviceMonitor().set_default_sink(sink_id):
+            self.statusBar().showMessage("Failed to set default output", 3000)
+            return
+        self.statusBar().showMessage("Default output updated", 2000)
+        if self._router_running():
+            self.restart_service()
+            self.statusBar().showMessage("Default output updated; router restarted", 2000)
+
     def update_devices(self, devices: List[Dict]):
-        """Update devices table"""
+        """Update devices table and default-sink combo"""
         self.devices = devices
         
         self.devices_table.setRowCount(len(devices))
+        self._refresh_default_sink_combo()
         
         for i, device in enumerate(devices):
             # Status indicator
@@ -788,12 +876,45 @@ class AudioRouterGUI(QMainWindow):
             device_id = device['id'][:50] + '...' if len(device['id']) > 50 else device['id']
             self.devices_table.setItem(i, 3, QTableWidgetItem(device_id))
     
+    def _get_sink_index_to_name(self) -> Dict[str, str]:
+        """Return dict sink_index -> sink_name from pactl list sinks short."""
+        out: Dict[str, str] = {}
+        try:
+            r = subprocess.run(
+                ['pactl', 'list', 'sinks', 'short'],
+                capture_output=True, text=True, timeout=2
+            )
+            if r.returncode != 0:
+                return out
+            for line in r.stdout.strip().split('\n'):
+                parts = line.split('\t')
+                if len(parts) >= 2:
+                    out[parts[0].strip()] = parts[1].strip()
+        except Exception:
+            pass
+        return out
+
+    def _rule_for_app(self, app_name: str) -> Optional[Dict]:
+        """Return the first routing rule that matches this application, or None (Default)."""
+        if not app_name or not self.rules:
+            return None
+        app_lower = app_name.lower()
+        for rule in self.rules:
+            apps = rule.get('applications', [])
+            keywords = rule.get('application_keywords', [])
+            for a in apps:
+                if a.lower() in app_lower or app_lower in a.lower():
+                    return rule
+            for kw in keywords:
+                if kw.lower() in app_lower:
+                    return rule
+        return None
+
     def update_streams(self, streams: List[Dict]):
-        """Update active streams table"""
+        """Update active streams table: app, output device (friendly), route (rule or Default)."""
+        sink_index_to_name = self._get_sink_index_to_name()
         self.streams_table.setRowCount(len(streams))
-        
         for i, stream in enumerate(streams):
-            # Application name (pactl: application.name in Properties)
             app_name = (
                 stream.get('application_name')
                 or stream.get('application.name')
@@ -802,20 +923,18 @@ class AudioRouterGUI(QMainWindow):
                 or 'Unknown'
             )
             self.streams_table.setItem(i, 0, QTableWidgetItem(app_name))
-            
-            # Current output device
-            sink = stream.get('sink', 'Unknown')
-            # Simplify sink name
-            if '.' in sink:
-                sink = sink.split('.')[-1]
-            self.streams_table.setItem(i, 1, QTableWidgetItem(sink))
-            
-            # Volume
-            volume = stream.get('volume', 'N/A')
-            if volume != 'N/A' and '%' in volume:
-                # Extract first percentage
-                volume = volume.split('/')[0].strip()
-            self.streams_table.setItem(i, 2, QTableWidgetItem(volume))
+            # Output device: resolve sink index -> name -> friendly
+            sink_idx = stream.get('sink', '')
+            sink_name = sink_index_to_name.get(sink_idx, sink_idx)
+            device = next((d for d in self.devices if d.get('id') == sink_name), None)
+            out_label = (device.get('friendly_name') or device.get('name')) if device else sink_name
+            if not out_label:
+                out_label = sink_name or 'Unknown'
+            self.streams_table.setItem(i, 1, QTableWidgetItem(out_label))
+            # Route: matching rule name or Default
+            rule = self._rule_for_app(app_name)
+            route_label = rule.get('name', 'Default') if rule else 'Default'
+            self.streams_table.setItem(i, 2, QTableWidgetItem(route_label))
     
     def get_device_type_icon(self, device_type: str) -> str:
         """Get emoji icon for device type"""
