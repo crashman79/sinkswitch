@@ -769,6 +769,11 @@ class AudioRouterGUI(QMainWindow):
         layout.addWidget(QLabel(f"Rules: {self.config_file}"))
         layout.addSpacing(8)
         layout.addWidget(QLabel(f"<b>Routing rules</b>: {len(self.rules)}"))
+        layout.addSpacing(8)
+        layout.addWidget(QLabel("<b>Feedback</b>"))
+        feedback_label = QLabel('<a href="mailto:githubfeedback.manger043@simplelogin.com">githubfeedback.manger043@simplelogin.com</a>')
+        feedback_label.setOpenExternalLinks(True)
+        layout.addWidget(feedback_label)
         layout.addStretch()
         return widget
 
