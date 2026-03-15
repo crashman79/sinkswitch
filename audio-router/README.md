@@ -1,16 +1,14 @@
 # PipeWire/PulseAudio Audio Router
 
-Automatic audio stream routing based on application classes and connected output devices.
+Standalone app: automatic audio stream routing by application and connected devices. No install script or systemd required.
 
 ## Features
 
-- **Intelligent Device Routing**: Automatically routes audio to different output devices based on application type
-- **Device Detection**: Automatically detects USB headsets, Bluetooth devices, HDMI outputs, and analog speakers
-- **Application Categories**: Groups applications by type (browsers, meetings, music, games) with optimized routing
-- **Graphical Interface**: Full-featured GUI for managing devices and routing rules
-- **System Tray Icon**: KDE Plasma and Gnome desktop integration
-- **Daemon Mode**: Runs as systemd user service for automatic routing
-- **PulseAudio Compatible**: Works with both PipeWire and PulseAudio backends
+- **Standalone app** – Run from project directory; config created on first run at `~/.config/pipewire-router/`
+- **Intelligent routing** – Routes audio by application type (browsers, meetings, media) to chosen outputs
+- **Device detection** – USB headsets, Bluetooth, HDMI, analog speakers
+- **GUI** – Configure rules, see devices and streams, start/stop router, optional “launch at login”
+- **PipeWire & PulseAudio** – Works with both backends
 
 ## Supported Browsers
 
@@ -21,32 +19,33 @@ Automatic audio stream routing based on application classes and connected output
 - Brave
 - Vivaldi
 
-## Quick Start
+## Quick Start (standalone)
+
+**Requirements:** Python 3.8+, PyQt6, PyYAML (and `dbus-python` for Bluetooth). Example: `pip install -r requirements.txt`
 
 ```bash
-./install.sh
-systemctl --user start pipewire-router
-systemctl --user enable pipewire-router
+cd audio-router
+python3 run_app.py
 ```
 
-## Graphical Interface
+On first run the app creates `~/.config/pipewire-router/config/routing_rules.yaml` (and can auto-generate rules from connected devices). Use the GUI to adjust rules, start/stop the router, and optionally enable “Launch app at login” in Settings.
 
-Launch the GUI for easy configuration:
+**GUI:** Devices, Routing rules, Active streams, Logs, Settings (start on login, auto-start routing, **Add to application menu**).
+
+### Launch without a terminal
+
+- **Application menu:** In the app, open **Settings** → **Add to application menu**. The app will appear in your app launcher (e.g. GNOME/KDE menu) so you can start it without a terminal.
+- **Single binary:** Build a standalone executable and run it (or move it to your PATH):
 
 ```bash
-~/.config/pipewire-router/launch-gui.sh
+cd audio-router
+pip install pyinstaller
+./build.sh
+# Binary: dist/pipewire-audio-router
+./dist/pipewire-audio-router
 ```
 
-Or search for "PipeWire Audio Router" in your application menu.
-
-**GUI Features:**
-- 🎧 Visual device list with real-time connection status
-- 🔀 Create and edit routing rules with forms
-- 📊 Monitor active audio streams in real-time
-- ⚙️ Service control (start/stop/restart)
-- 📋 Built-in log viewer
-
-**Requirements:** `sudo pacman -S python-pyqt6`
+You can move `dist/pipewire-audio-router` anywhere and run it directly; config is still in `~/.config/pipewire-router/`.
 
 ## Command Line Usage
 
@@ -80,6 +79,6 @@ routing_rules:
     enable_default_fallback: true
 ```
 
-## Installation
+## Optional: install script and systemd
 
-See SETUP_COMPLETE.md for detailed installation instructions.
+For a system-wide install under `~/.config/pipewire-router` and a systemd user service, run `./install.sh`. The standalone app does not require it.
