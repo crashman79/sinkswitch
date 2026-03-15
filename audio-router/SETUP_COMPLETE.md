@@ -1,344 +1,107 @@
-# PipeWire/PulseAudio Audio Router - Setup Complete
+# PipeWire Audio Router – Setup & Usage
 
-## Installation Status: ✅ COMPLETE
+## Recommended: Standalone App
 
-Your audio router system is fully installed and operational.
+The app runs without installing a service. Use the GUI to configure routing and start/stop the router.
 
-### Core System: ✅ RUNNING
-- **Service**: `pipewire-router` (systemd user service)
-- **Status**: Active and monitoring (started at boot automatically)
-- **Config Location**: `~/.config/pipewire-router/`
-- **Rules**: Auto-generated based on your connected devices
+### First-time setup
 
-### Current Setup
-
-**Connected Devices:**
-- Speakers: `alsa_output.pci-0000_0e_00.4.analog-stereo`
-- USB Headset: Logitech G633
-- Bluetooth: Aurvana Ace 2
-
-**Active Routing Rules:**
-- Browsers (Firefox, Chrome) → Bluetooth
-- Communication (Teams, Discord) → Bluetooth  
-- Music (Spotify, VLC, mpv) → Bluetooth
-- Default/Games → USB or Speakers
-
-**Key Features:**
-- ✅ Automatic device detection
-- ✅ Intelligent device classification (USB, Bluetooth, HDMI, Analog)
-- ✅ Application-based stream routing
-- ✅ Config auto-generation on every startup
-- ✅ Hot-plug device detection (checks every 5 seconds)
-- ✅ Fallback to default device if target disconnects
-- ⚠️ System tray icon (optional, needs setup)
-
-## Quick Commands
-
-### Service Management
-```bash
-# Check status
-systemctl --user status pipewire-router --no-pager
-
-# View real-time logs
-journalctl --user -u pipewire-router -f
-
-# Restart service
-systemctl --user restart pipewire-router
-
-# Stop service
-systemctl --user stop pipewire-router
-
-# Check if enabled to start at boot
-systemctl --user is-enabled pipewire-router
-```
-
-### Configuration
-```bash
-# List all audio devices
-~/.config/pipewire-router/venv/bin/python3 ~/.config/pipewire-router/src/audio_router.py list-devices
-
-# Regenerate routing rules (auto-detects devices)
-~/.config/pipewire-router/venv/bin/python3 ~/.config/pipewire-router/src/audio_router.py generate-config
-
-# View current routing config
-cat ~/.config/pipewire-router/config/routing_rules.yaml
-
-# Apply rules once (without daemon mode)
-~/.config/pipewire-router/venv/bin/python3 ~/.config/pipewire-router/src/audio_router.py apply-rules ~/.config/pipewire-router/config/routing_rules.yaml
-```
-
-### Audio Testing
-```bash
-# Test audio on different devices
-pactl list sinks         # List all audio outputs
-pactl list sources       # List all audio inputs
-
-# Monitor device changes (same logic as daemon)
-~/.config/pipewire-router/venv/bin/python3 ~/.config/pipewire-router/src/audio_router.py monitor ~/.config/pipewire-router/config/routing_rules.yaml
-```
-
-## Optional: System Tray Icon
-
-A system tray icon provides a convenient GUI for managing the audio router.
-
-### Prerequisites
-```bash
-# Install GTK bindings (required)
-sudo pacman -S python-gobject
-
-# Install optional: improved KDE integration
-sudo pacman -S python-dbus
-```
-
-### Launch Tray Icon
-```bash
-# Manual launch from terminal
-~/.config/pipewire-router/launch-tray-icon.sh
-
-# Auto-launch on login
-# Already enabled: ~/.config/autostart/audio-router-tray.desktop
-```
-
-### Tray Icon Features
-- **Left-click**: Show current routing status
-- **Right-click menu**:
-  - Pause/Resume: Temporarily disable routing
-  - Regenerate Config: Re-detect devices and update rules
-  - View Logs: Open service logs
-  - Quit: Exit tray (service continues running)
-
-**Note:** Tray icon only works in graphical environments with system tray support:
-- KDE Plasma 5/6 ✅
-- Gnome 42+ ✅
-- XFCE ✅
-- MATE ✅
-- Other desktops: May work if they support freedesktop StatusNotifierItem
-
-## Architecture Overview
-
-### Files and Purpose
-
-**Core Python Modules** (`~/.config/pipewire-router/src/`):
-- `audio_router.py` - CLI interface (generate-config, list-devices, apply-rules, monitor)
-- `audio_router_engine.py` - Stream routing engine (pactl-based)
-- `config_parser.py` - YAML configuration parser
-- `device_monitor.py` - Device detection and monitoring
-- `intelligent_audio_router.py` - Device classification and config generation
-- `tray_icon.py` - Optional GUI system tray icon
-
-**Configuration** (`~/.config/pipewire-router/config/`):
-- `routing_rules.yaml` - Auto-generated routing rules
-
-**Supporting Files**:
-- `~/.config/systemd/user/pipewire-router.service` - Main daemon service
-- `~/.config/pipewire/pipewire.conf.d/99-disable-auto-routing.conf` - Disable PipeWire auto-routing
-- `~/.config/autostart/audio-router-tray.desktop` - Desktop entry for tray auto-launch
-- `~/.config/pipewire-router/launch-tray-icon.sh` - Tray launcher helper
-
-### How It Works
-
-1. **Startup**: systemd service runs `generate-config-startup.sh` which detects all connected audio devices
-2. **Device Classification**: Intelligent system classifies devices as:
-   - Bluetooth (bluez_output.*)
-   - USB Headset (usb-*headset* or usb-*earbuds*)
-   - HDMI (HDMI)
-   - Analog/Speakers (others)
-3. **Config Generation**: Creates optimal routing rules based on what's connected
-4. **Monitoring**: Daemon monitors device changes every 5 seconds and applies rules
-5. **Stream Routing**: Uses pactl to move audio streams to correct devices based on app name
-6. **Fallback**: If target device disconnects, falls back to default device
-
-## Troubleshooting
-
-### Routing Not Working
-```bash
-# 1. Check service is running
-systemctl --user status pipewire-router --no-pager
-
-# 2. View recent logs
-journalctl --user -u pipewire-router --no-pager | tail -30
-
-# 3. Check if rules are loaded
-cat ~/.config/pipewire-router/config/routing_rules.yaml
-
-# 4. Verify devices are detected
-~/.config/pipewire-router/venv/bin/python3 ~/.config/pipewire-router/src/audio_router.py list-devices
-```
-
-### Wrong Device Selected
-```bash
-# Regenerate config to update device IDs
-~/.config/pipewire-router/venv/bin/python3 ~/.config/pipewire-router/src/audio_router.py generate-config
-
-# Check pactl sees the device
-pactl list sinks | grep Name:
-
-# Restart service to apply new config
-systemctl --user restart pipewire-router
-```
-
-### Tray Icon Not Launching
-```bash
-# Check for display server
-echo "DISPLAY=$DISPLAY, WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
-
-# Test tray icon manually
-~/.config/pipewire-router/launch-tray-icon.sh
-
-# Check for GTK installation
-pacman -Q python-gobject
-
-# If missing, install:
-sudo pacman -S python-gobject
-```
-
-### Audio Glitches or Delays
-```bash
-# Check PipeWire auto-routing isn't re-enabling
-cat ~/.config/pipewire/pipewire.conf.d/99-disable-auto-routing.conf
-
-# Verify pactl works
-pactl list sinks
-pactl list sink-inputs
-
-# Check for conflicts with other audio managers
-systemctl --user status pulseaudio
-```
-
-## Key Design Decisions
-
-### Why Auto-Generate Config?
-- Routing rules change as devices connect/disconnect
-- Auto-generation ensures optimal setup at all times
-- Eliminates need for manual device ID lookups
-- Deterministic: Same devices = Same rules
-
-### Why pactl-based Routing?
-- Works with both PipeWire and PulseAudio
-- No need for PipeWire modules or filters
-- More stable than module-loading approaches
-- Simpler code, fewer dependencies
-
-### Why Disable PipeWire Auto-Routing?
-- Prevents conflicts between automatic systems
-- Gives our intelligent system full control
-- Can implement custom logic (device detection)
-- Ensures predictable behavior
-
-### Why System Tray Optional?
-- Core functionality doesn't need GUI
-- GTK dependencies not always available
-- Reduces complexity of main service
-- Users can just use CLI/systemd commands
-
-## Performance Notes
-
-- **CPU**: ~0.15% idle (minimal monitoring overhead)
-- **Memory**: ~10MB (small Python venv)
-- **Latency**: ~100ms for device detection and routing
-- **Startup Time**: ~1 second to detect devices and apply rules
-
-## File Locations
-
-```
-~/.config/pipewire-router/
-├── venv/                              # Python virtual environment
-├── src/
-│   ├── audio_router.py                # Main CLI
-│   ├── audio_router_engine.py
-│   ├── config_parser.py
-│   ├── device_monitor.py
-│   ├── intelligent_audio_router.py
-│   └── tray_icon.py                   # Optional GUI
-├── config/
-│   └── routing_rules.yaml             # Auto-generated rules
-├── launch-tray-icon.sh                # Tray launcher helper
-├── generate-config-startup.sh         # Startup script for systemd
-└── README.md
-
-~/.config/systemd/user/
-└── pipewire-router.service            # Main systemd service
-
-~/.config/pipewire/pipewire.conf.d/
-└── 99-disable-auto-routing.conf       # PipeWire config override
-
-~/.config/autostart/
-└── audio-router-tray.desktop          # Desktop entry for tray icon
-```
-
-## Development & Maintenance
-
-### To Update Routing Rules Manually
-Edit `~/.config/pipewire-router/config/routing_rules.yaml`:
-```yaml
-routing_rules:
-  - name: "My Game"
-    applications:
-      - "game_name"
-    target_device: "device_id_from_pactl"
-    enable_default_fallback: true
-```
-
-Then restart: `systemctl --user restart pipewire-router`
-
-### To Test New Applications
-```bash
-# 1. Run app and start playing audio
-# 2. In another terminal, find the app:
-pactl list sink-inputs | grep -A 2 "application.name"
-
-# 3. If routing doesn't work, add to rules and regenerate config
-```
-
-### To Debug Routing
-Add logging to the monitor loop by editing `/src/audio_router_engine.py`:
-```python
-# Add debug output before:
-self._route_pa_stream(...)
-```
-
-## Next Steps
-
-1. **Verify**: Check that audio routing works as expected
+1. **Requirements**: Python 3.8+, PyQt6, PyYAML (and `dbus-python` for Bluetooth).
    ```bash
-   journalctl --user -u pipewire-router --no-pager | tail -20
+   pip install -r requirements.txt
+   ```
+   On PEP 668 distros (e.g. Arch), use a venv or run `build.sh` to create a binary.
+
+2. **Run the app**
+   ```bash
+   cd audio-router
+   python3 run_app.py
+   ```
+   Or build a binary and run it:
+   ```bash
+   ./build.sh
+   ./dist/pipewire-audio-router
    ```
 
-2. **Optional**: Set up system tray icon
-   ```bash
-   sudo pacman -S python-gobject
-   ~/.config/pipewire-router/launch-tray-icon.sh
-   ```
+3. **First run**: The app creates `~/.config/pipewire-router/config/routing_rules.yaml` (auto-generated from connected devices if possible).
 
-3. **Customize**: Adjust routing rules if needed
-   ```bash
-   # Regenerate to see what was auto-detected
-   ~/.config/pipewire-router/venv/bin/python3 ~/.config/pipewire-router/src/audio_router.py generate-config
-   
-   # Edit if needed
-   nano ~/.config/pipewire-router/config/routing_rules.yaml
-   ```
+4. **GUI**
+   - **Devices**: See outputs with friendly names; refresh as needed.
+   - **Routing rules**: Add/edit/delete rules, or **Auto-Generate Rules**.
+   - **Active streams**: See which app is playing and where it’s routed.
+   - **Logs**: In-app log buffer (no journal when running standalone).
+   - **Settings**: Start on login (XDG autostart), Start routing when app opens, Close to tray, **Add to application menu**.
 
-4. **Enable at Boot**: Already enabled, verify with
-   ```bash
-   systemctl --user is-enabled pipewire-router
-   ```
+5. **Start/Stop**: Use the toolbar buttons. They are enabled only when applicable (e.g. Start is disabled while the router is running).
 
-## Support & Issues
+6. **Tray**: If your desktop has a system tray, the app shows an icon. With **Close to tray** enabled, closing the window hides the app to the tray instead of quitting. Use the tray menu to Show, Start/Stop router, or Quit.
 
-If audio routing isn't working:
+### Config location
 
-1. **Check service**: `systemctl --user status pipewire-router --no-pager`
-2. **View logs**: `journalctl --user -u pipewire-router --no-pager`
-3. **Verify devices**: `pactl list sinks | grep Name:`
-4. **Regenerate config**: `~/.config/pipewire-router/venv/bin/python3 ~/.config/pipewire-router/src/audio_router.py generate-config`
-5. **Restart service**: `systemctl --user restart pipewire-router`
+- **Config dir**: `~/.config/pipewire-router/` (or set `AUDIO_ROUTER_CONFIG`).
+- **Rules**: `config/routing_rules.yaml`.
+- **App settings**: `app_settings.json` (start on login, close to tray, etc.).
 
-For more detailed troubleshooting, see README.md in the project directory.
+### Launch without a terminal
+
+- **Settings → Add to application menu**: Adds a launcher to `~/.local/share/applications/` so the app appears in your app menu.
+- **Settings → Launch app at login**: Adds an entry to `~/.config/autostart/` so the app starts when you log in.
 
 ---
 
-**Last Updated**: 2025-11-22
-**System**: CachyOS (Arch Linux) with PipeWire 1.4.9
-**Python**: 3.11+ (isolated venv)
-**Status**: ✅ Production Ready
+## Optional: Install script and systemd
+
+If you prefer the router to run as a user service (no GUI required) at session start:
+
+```bash
+cd audio-router
+./install.sh
+systemctl --user start pipewire-router
+systemctl --user enable pipewire-router
+```
+
+This installs files under `~/.config/pipewire-router/`, creates a venv, and installs `~/.config/systemd/user/pipewire-router.service`. The standalone app does **not** require this; it runs the router inside the GUI process.
+
+### Service commands (when using install.sh)
+
+```bash
+systemctl --user status pipewire-router --no-pager
+journalctl --user -u pipewire-router -f
+systemctl --user restart pipewire-router
+```
+
+---
+
+## Troubleshooting
+
+### Routing not working (standalone app)
+
+- Ensure the router is **Running** (green) in the GUI; click **Start** if needed.
+- Check **Devices**: target devices should appear with friendly names.
+- Check **Active streams**: application names should appear; if not, pactl may use a different property format.
+- **Logs** tab: look for errors.
+
+### Routing not working (systemd)
+
+- `systemctl --user status pipewire-router --no-pager`
+- `journalctl --user -u pipewire-router --no-pager | tail -30`
+- Regenerate config and restart: edit or regenerate `~/.config/pipewire-router/config/routing_rules.yaml`, then `systemctl --user restart pipewire-router`
+
+### Wrong device or “Unknown” in streams
+
+- Use **Auto-Generate Rules** in the GUI to refresh rules from current devices.
+- For Active streams, the app reads `application.name` from `pactl list sink-inputs`; if your app doesn’t set it, the name may be generic or “Unknown”.
+
+### Tray icon missing
+
+- The tray is only shown if `QSystemTrayIcon.isSystemTrayAvailable()` is true (e.g. GNOME/KDE/XFCE with a system tray).
+- “Close to tray” only has an effect when the tray is available.
+
+---
+
+## Architecture (standalone app)
+
+- **run_app.py**: Sets `AUDIO_ROUTER_CONFIG`, `AUDIO_ROUTER_LAUNCH_CMD`, `AUDIO_ROUTER_WORKING_DIR`; bootstraps config; runs GUI.
+- **GUI**: Starts a `MonitorThread` that runs `DeviceMonitor.watch_devices(..., stop_event=...)` and applies rules; config can auto-regenerate on Bluetooth/USB changes.
+- **Config**: YAML `routing_rules` with `name`, `applications`, `target_device` (sink id), `enable_default_fallback`.
+- **Quit**: With `setQuitOnLastWindowClosed(False)`, the app only exits when you use **Quit** from the tray or close the window with “Close to tray” disabled.

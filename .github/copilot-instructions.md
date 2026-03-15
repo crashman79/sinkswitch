@@ -1,94 +1,61 @@
-# PipeWire/PulseAudio Audio Router - Project Instructions
+# PipeWire Audio Router – Project Instructions
+
+## Project Overview
+
+Standalone GUI application for automatic audio stream routing on PipeWire/PulseAudio: route applications to specific outputs (Bluetooth, USB, HDMI, etc.) by rule. No systemd or install script required for normal use.
 
 ## Development Guidelines
 
-### Terminal Commands
-- Always use `--no-pager` flag with `systemctl` and `journalctl` commands to prevent interactive pager mode
-- Example: `journalctl --user -u pipewire-router --no-pager`
-- Example: `systemctl --user status pipewire-router --no-pager`
+### Terminal / shell
 
-### Shell Usage - Use Bash Instead of Fish
-- **User's default shell is fish, but use bash for all terminal commands and scripts**
-- Fish shell has significant compatibility issues and unexpected behavior quirks
-- When running commands in the terminal, explicitly use bash:
-  - Use: `bash -c "command here"` or start an interactive bash session
-  - Use bash syntax for scripts (heredocs, source commands, etc.)
-  - Venv activation: `source ~/.config/pipewire-router/venv/bin/activate`
-- Do NOT generate fish-specific syntax - use standard bash/sh syntax instead
-- This avoids unexpected behavior and ensures commands work reliably
+- Use **bash** for commands and scripts (not fish). Use `bash -c "..."` or run in a bash session when needed.
+- For systemd/journal: use `--no-pager` (e.g. `systemctl --user status pipewire-router --no-pager`).
 
-### Arch Linux / CachyOS Specifics
-- User is running CachyOS (Arch Linux flavor)
-- Python package management requires virtual environments due to PEP 668 (externally-managed-environment)
-- Do NOT use `pip install --user` or `pip install --break-system-packages`
-- Always use `python3 -m venv` for isolated environments
-- Use `pacman` for system packages, virtual environments for Python packages
-- Package manager is `pacman`, not `apt` or `yum`
-- `yay` is also available as AUR helper
+### Python / Arch (PEP 668)
 
-## Project Overview
-A comprehensive Python-based system for automatic audio stream routing in PipeWire/PulseAudio based on application classes and connected output devices.
+- User may be on Arch/CachyOS; avoid `pip install --user` or `--break-system-packages`.
+- Use a **venv** for Python deps. The app’s `build.sh` creates `.venv-build` and installs PyInstaller + requirements there.
 
 ## Project Structure
-- **src/**: Python source code for routing engine
-  - `audio_router.py`: Main CLI interface with generate-config, apply-rules, monitor, list-devices commands
-  - `device_monitor.py`: Device detection and monitoring
-  - `config_parser.py`: YAML configuration parsing
-  - `audio_router_engine.py`: Routing logic engine (pactl-based stream routing)
-  - `intelligent_audio_router.py`: Intelligent device classification and automatic config generation
-  - `tray_icon.py`: System tray icon (KDE Plasma and Gnome)
 
-- **config/**: Configuration files
-  - `routing_rules.yaml`: Auto-generated routing configuration
+- **audio-router/**
+  - `run_app.py` – Standalone launcher (script or frozen binary); sets env, bootstraps config, runs GUI.
+  - `build.sh` – Builds single binary with PyInstaller using a project venv.
+  - `run_app.spec` – PyInstaller spec.
+  - **src/** – Python source:
+    - `audio_router_gui.py` – Main window, integrated tray, in-app monitor thread, Settings.
+    - `device_monitor.py` – Device list, `watch_devices(stop_event=...)`, friendly names.
+    - `audio_router_engine.py` – pactl-based routing.
+    - `config_parser.py`, `intelligent_audio_router.py` – Config and auto-generation.
+    - `tray_icon.py` – Legacy standalone tray for systemd (optional).
+  - **config/** – Example/default routing config.
+  - **systemd/** – Optional user service (used by install.sh).
+  - **install.sh** – Optional: copy to ~/.config/pipewire-router, venv, systemd service.
 
-- **systemd/**: SystemD service files for daemon mode
+## Features
 
-- **examples/**: Example configurations
+- **Standalone app**: Run via `python3 run_app.py` or `./dist/pipewire-audio-router`; config in `~/.config/pipewire-router/`.
+- **GUI**: Devices (friendly names), Routing rules, Active streams (app names from pactl), Logs, Settings.
+- **In-app router**: Start/Stop/Restart control a background thread; no systemd required.
+- **Settings**: Start on login (XDG), Start routing when app opens, Close to tray, Add to application menu.
+- **Tray**: Integrated tray icon (Show, Start/Stop, Quit); “Close to tray” hides window instead of quitting.
+- **Optional**: `install.sh` for systemd user service at session start.
 
-## Features Implemented
-- Audio device detection and monitoring (PipeWire & PulseAudio)
-- **Intelligent device classification** - Automatically detects device types (USB headsets, Bluetooth, analog speakers, HDMI)
-- **Auto-generated routing rules** - Creates optimal routing based on connected devices on every service startup
-- Application-based stream routing rules with automatic fallback
-- YAML configuration format
-- CLI and daemon modes
-- SystemD integration with auto-config generation on startup
-- Device hotplug detection and rule application (every 5 seconds)
-- **System tray icon** - Optional tray icon for KDE Plasma and Gnome with pause/resume and config regeneration
-- PipeWire auto-routing disabled to prevent conflicts with manual routing
+## Usage (for AI / docs)
 
-## Usage
 ```bash
-# Auto-generate routing rules based on connected devices
-python3 src/audio_router.py generate-config
+# Run app (from repo)
+cd audio-router && python3 run_app.py
 
-# List available devices
-python3 src/audio_router.py list-devices
+# Build binary
+cd audio-router && ./build.sh && ./dist/pipewire-audio-router
 
-# Apply routing rules once
-python3 src/audio_router.py apply-rules config/routing_rules.yaml
-
-# Monitor and apply rules continuously (runs as daemon via systemd)
-python3 src/audio_router.py monitor config/routing_rules.yaml
+# Optional install + systemd
+cd audio-router && ./install.sh && systemctl --user start pipewire-router
 ```
 
-## Installation
-```bash
-./install.sh
-systemctl --user start pipewire-router
-systemctl --user enable pipewire-router
-```
+## Configuration
 
-## Configuration Format
-Routing rules are defined in YAML with the following structure:
-```yaml
-routing_rules:
-  - name: "Rule Name"
-    applications:
-      - "app1"
-      - "app2"
-    application_keywords:
-      - "keyword1"
-    target_device: "device_name"
-    enable_default_fallback: true
-```
+- **Path**: `~/.config/pipewire-router/` or `AUDIO_ROUTER_CONFIG`.
+- **Rules**: `config/routing_rules.yaml` (YAML with `routing_rules` list).
+- **App settings**: `app_settings.json` (start_on_login, start_routing_on_launch, close_to_tray).
