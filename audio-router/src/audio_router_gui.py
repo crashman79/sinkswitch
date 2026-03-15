@@ -1,34 +1,49 @@
 #!/usr/bin/env python3
 """
-PipeWire Audio Router GUI Application
-Full-featured graphical interface for managing audio routing rules
+PipeWire Audio Router – standalone GUI app.
+Device monitoring and routing run inside this app; no systemd or install script required.
 
-Features:
-- Visual device list with real-time connection status
-- Drag-and-drop rule creation
-- Live audio stream monitoring
-- Service control (start/stop/restart)
-- Configuration editor
-- Log viewer
-
-Requirements:
-  sudo pacman -S python-pyqt6
+Requirements: Python 3.8+, PyQt6, PyYAML (pip install -r requirements.txt)
+Run: python3 run_app.py   (from the audio-router directory)
 """
 
 import sys
 import os
+import json
 import logging
 import subprocess
+import threading
 import yaml
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
-# Setup logging
+# Config base: set by run_app.py or default
+def _config_base() -> Path:
+    p = os.environ.get("AUDIO_ROUTER_CONFIG")
+    return Path(p) if p else Path.home() / ".config" / "pipewire-router"
+
+# In-memory log capture for standalone (no journal)
+_log_buffer: List[str] = []
+_log_buffer_max = 500
+
+class BufferHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            _log_buffer.append(self.format(record))
+            while len(_log_buffer) > _log_buffer_max:
+                _log_buffer.pop(0)
+        except Exception:
+            pass
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+_root_logger = logging.getLogger()
+_handler = BufferHandler()
+_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+_root_logger.addHandler(_handler)
 
 # Check for display server
 if not os.getenv('DISPLAY') and not os.getenv('WAYLAND_DISPLAY'):
@@ -42,10 +57,11 @@ try:
         QPushButton, QLabel, QListWidget, QListWidgetItem, QTextEdit,
         QSplitter, QGroupBox, QTabWidget, QTableWidget, QTableWidgetItem,
         QHeaderView, QMessageBox, QFileDialog, QComboBox, QLineEdit,
-        QDialog, QDialogButtonBox, QCheckBox, QScrollArea
+        QDialog, QDialogButtonBox, QCheckBox, QScrollArea, QRadioButton, QButtonGroup
     )
     from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QAction
     from PyQt6.QtCore import QTimer, Qt, QSize, pyqtSignal, QThread
+    from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
 except ImportError as e:
     logger.error(f"PyQt6 not available: {e}")
     logger.error("Install with: sudo pacman -S python-pyqt6")
@@ -56,6 +72,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 try:
     from device_monitor import DeviceMonitor
     from config_parser import ConfigParser
+    from audio_router_engine import AudioRouterEngine
     from intelligent_audio_router import IntelligentAudioRouter
 except ImportError as e:
     logger.error(f"Failed to import audio router modules: {e}")
@@ -104,31 +121,40 @@ class StreamMonitorThread(QThread):
             self.msleep(2000)  # Update every 2 seconds
     
     def _get_active_streams(self) -> List[Dict]:
-        """Get list of active audio streams"""
+        """Get list of active audio streams (pactl: colon and key=value props)."""
         try:
             result = subprocess.run(
                 ['pactl', 'list', 'sink-inputs'],
                 capture_output=True, text=True, timeout=3
             )
-            
             streams = []
             current_stream = {}
-            
             for line in result.stdout.split('\n'):
-                line = line.strip()
-                
-                if line.startswith('Sink Input #'):
+                line_stripped = line.strip()
+                if line_stripped.startswith('Sink Input #'):
                     if current_stream:
                         streams.append(current_stream)
-                    current_stream = {'id': line.split('#')[1]}
-                elif ':' in line and current_stream:
-                    key, value = line.split(':', 1)
+                    current_stream = {'id': line_stripped.split('#')[1].strip()}
+                elif not current_stream:
+                    continue
+                elif '=' in line_stripped:
+                    # Properties: application.name = "Vivaldi"
+                    parts = line_stripped.split('=', 1)
+                    if len(parts) == 2:
+                        key = parts[0].strip().lower()
+                        value = parts[1].strip().strip('"').strip("'")
+                        current_stream[key] = value
+                        if key == 'application.name' and value:
+                            current_stream['application_name'] = value
+                elif ':' in line_stripped:
+                    key, value = line_stripped.split(':', 1)
                     key = key.strip().lower().replace(' ', '_')
                     current_stream[key] = value.strip().strip('"')
-            
             if current_stream:
+                # Prefer application.name / application_name for display
+                if 'application_name' not in current_stream and current_stream.get('application.name'):
+                    current_stream['application_name'] = current_stream['application.name']
                 streams.append(current_stream)
-            
             return streams
         except Exception as e:
             logger.error(f"Error getting streams: {e}")
@@ -136,6 +162,49 @@ class StreamMonitorThread(QThread):
     
     def stop(self):
         self.running = False
+
+
+class MonitorThread(QThread):
+    """Runs the audio router monitor loop in the background (in-app mode)."""
+    def __init__(self, config_file: Path):
+        super().__init__()
+        self.config_file = config_file
+        self.stop_event = threading.Event()
+
+    def run(self):
+        try:
+            rules_ref: List[Dict] = []
+            parser = ConfigParser(str(self.config_file))
+            rules_ref[:] = parser.parse()
+            monitor = DeviceMonitor()
+            engine = AudioRouterEngine()
+
+            def regenerate_and_reload():
+                try:
+                    logger.info("Regenerating routing configuration...")
+                    router = IntelligentAudioRouter()
+                    config = router.generate_routing_config()
+                    self.config_file.parent.mkdir(parents=True, exist_ok=True)
+                    with open(self.config_file, 'w') as f:
+                        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+                    rules_ref[:] = ConfigParser(str(self.config_file)).parse()
+                    engine.apply_rules(rules_ref)
+                except Exception as e:
+                    logger.error(f"Failed to regenerate config: {e}")
+
+            def apply_rules():
+                engine.apply_rules(rules_ref)
+
+            monitor.watch_devices(
+                apply_rules,
+                config_regen_callback=regenerate_and_reload,
+                stop_event=self.stop_event
+            )
+        except Exception as e:
+            logger.error(f"Monitor error: {e}")
+
+    def stop(self):
+        self.stop_event.set()
 
 
 class RuleEditorDialog(QDialog):
@@ -188,7 +257,9 @@ class RuleEditorDialog(QDialog):
         layout.addWidget(QLabel("Target Device:"))
         self.device_combo = QComboBox()
         for device in self.devices:
-            display_name = f"{device['name']} ({device['device_type']})"
+            friendly = device.get('friendly_name') or device.get('name', '')
+            dtype = device.get('device_type', '')
+            display_name = f"{friendly} ({dtype})" if dtype else friendly
             self.device_combo.addItem(display_name, device['id'])
         
         # Select current device if editing
@@ -240,23 +311,186 @@ class RuleEditorDialog(QDialog):
         return rule
 
 
+def _app_settings_path() -> Path:
+    return _config_base() / 'app_settings.json'
+
+
+def _load_app_settings() -> Dict[str, Any]:
+    path = _app_settings_path()
+    if not path.exists():
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_app_settings(data: Dict[str, Any]) -> None:
+    path = _app_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+
+
+def _applications_dir() -> Path:
+    """User application menu directory (~/.local/share/applications)."""
+    return Path.home() / ".local" / "share" / "applications"
+
+
+def _create_app_menu_shortcut() -> Optional[Path]:
+    """Add a .desktop entry to the application menu. Returns path or None on failure."""
+    app_dir = _applications_dir()
+    app_dir.mkdir(parents=True, exist_ok=True)
+    path = app_dir / "pipewire-audio-router.desktop"
+    exec_cmd = os.environ.get("AUDIO_ROUTER_LAUNCH_CMD", f"{sys.executable} -m run_app")
+    work_dir = os.environ.get("AUDIO_ROUTER_WORKING_DIR", str(Path.home()))
+    path_line = f"Path={work_dir}\n" if work_dir else ""
+    content = f"""[Desktop Entry]
+Type=Application
+Name=PipeWire Audio Router
+Comment=Automatic audio routing for PipeWire/PulseAudio
+Exec={exec_cmd}
+{path_line}Icon=audio-card
+Terminal=false
+Categories=AudioVideo;Audio;Settings;
+Keywords=audio;routing;pipewire;pulseaudio;
+StartupNotify=true
+"""
+    try:
+        path.write_text(content)
+        path.chmod(0o644)
+        return path
+    except Exception as e:
+        logger.error("Failed to create application menu shortcut: %s", e)
+        return None
+
+
+def _autostart_desktop_path() -> Path:
+    return Path.home() / '.config/autostart/pipewire-audio-router.desktop'
+
+
+def _is_autostart_enabled() -> bool:
+    return _autostart_desktop_path().exists()
+
+
+def _set_autostart_enabled(enabled: bool, exec_cmd: str) -> None:
+    path = _autostart_desktop_path()
+    if enabled:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        content = f"""[Desktop Entry]
+Type=Application
+Name=PipeWire Audio Router
+Comment=Automatic audio routing (launched at login)
+Exec={exec_cmd}
+Icon=audio-card
+Terminal=false
+Categories=AudioVideo;Audio;
+X-GNOME-Autostart-enabled=true
+"""
+        path.write_text(content)
+    elif path.exists():
+        path.unlink()
+
+
 class AudioRouterGUI(QMainWindow):
     """Main GUI window for audio router"""
-    
+
     def __init__(self):
         super().__init__()
-        self.config_file = Path.home() / '.config/pipewire-router/config/routing_rules.yaml'
-        self.devices = []
-        self.rules = []
-        
-        # Background update threads
+        self.config_base = _config_base()
+        self.config_file = self.config_base / 'config' / 'routing_rules.yaml'
+        self.devices: List[Dict] = []
+        self.rules: List[Dict] = []
+
+        # Bootstrap config on first run
+        if not self.config_file.exists():
+            self.config_file.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                router = IntelligentAudioRouter()
+                cfg = router.generate_routing_config()
+                with open(self.config_file, 'w') as f:
+                    yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+            except Exception as e:
+                logger.warning("Could not generate initial config: %s", e)
+                self.config_file.write_text('routing_rules: []\n')
+
+        settings = _load_app_settings()
+        self.start_on_login = settings.get('start_on_login', 'none')
+        self.start_routing_on_launch = settings.get('start_routing_on_launch', True)
+        self.close_to_tray = settings.get('close_to_tray', False)
+        self.monitor_thread: Optional[MonitorThread] = None
         self.device_thread = None
         self.stream_thread = None
-        
+
         self.init_ui()
+        self._setup_tray()
         self.load_config()
         self.start_background_updates()
         self.update_service_status()
+        if self.start_routing_on_launch and self.config_file.exists():
+            self._start_in_app_monitor()
+
+    def _setup_tray(self):
+        """Create system tray icon if available."""
+        self.tray_icon: Optional[QSystemTrayIcon] = None
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        # Parent to app so icon stays when window is hidden
+        self.tray_icon = QSystemTrayIcon(QApplication.instance())
+        self.tray_icon.setIcon(self._tray_icon_pixmap())
+        self.tray_icon.setToolTip("PipeWire Audio Router")
+        menu = QMenu()
+        show_act = menu.addAction("Show")
+        show_act.triggered.connect(self._show_from_tray)
+        menu.addSeparator()
+        start_act = menu.addAction("▶ Start router")
+        start_act.triggered.connect(self.start_service)
+        stop_act = menu.addAction("⏸ Stop router")
+        stop_act.triggered.connect(self.stop_service)
+        menu.addSeparator()
+        quit_act = menu.addAction("Quit")
+        quit_act.triggered.connect(self._quit_from_tray)
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        self.tray_icon.show()
+
+    def _tray_icon_pixmap(self) -> QIcon:
+        size = QSize(22, 22)
+        pixmap = QPixmap(size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QColor(76, 175, 80))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(2, 2, 18, 18)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger or reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._show_from_tray()
+
+    def _show_from_tray(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_from_tray(self):
+        self._cleanup()
+        QApplication.instance().quit()
+
+    def _cleanup(self):
+        """Stop router and background threads (before quit or real close)."""
+        self._stop_in_app_monitor()
+        if self.device_thread:
+            self.device_thread.stop()
+            self.device_thread.wait(2000)
+        if self.stream_thread:
+            self.stream_thread.stop()
+            self.stream_thread.wait(2000)
+        if self.tray_icon:
+            self.tray_icon.hide()
     
     def init_ui(self):
         """Initialize the user interface"""
@@ -315,7 +549,11 @@ class AudioRouterGUI(QMainWindow):
         # Tab 4: Logs
         logs_tab = self.create_logs_tab()
         tabs.addTab(logs_tab, "📋 Logs")
-        
+
+        # Tab 5: Settings (run mode, start on login)
+        settings_tab = self.create_settings_tab()
+        tabs.addTab(settings_tab, "⚙️ Settings")
+
         # Status bar
         self.statusBar().showMessage("Ready")
     
@@ -334,6 +572,7 @@ class AudioRouterGUI(QMainWindow):
         self.devices_table = QTableWidget()
         self.devices_table.setColumnCount(4)
         self.devices_table.setHorizontalHeaderLabels(['Status', 'Name', 'Type', 'Device ID'])
+        self.devices_table.setToolTip("Name = friendly name; Device ID = internal sink name used for routing")
         self.devices_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.devices_table.setAlternatingRowColors(True)
         self.devices_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -434,9 +673,83 @@ class AudioRouterGUI(QMainWindow):
         
         # Auto-refresh logs
         self.refresh_logs()
-        
+
         return widget
-    
+
+    def create_settings_tab(self) -> QWidget:
+        """Create the Settings tab (start on login, auto-start routing)."""
+        widget = QWidget()
+        layout = QVBoxLayout()
+        widget.setLayout(layout)
+
+        login_group = QGroupBox("Start on login (Linux desktop)")
+        login_layout = QVBoxLayout()
+        self.login_none_radio = QRadioButton("None – start manually")
+        self.login_xdg_radio = QRadioButton("Launch app at login – XDG Autostart (~/.config/autostart); works on GNOME, KDE, XFCE, MATE, etc.")
+        self.login_none_radio.setChecked(self.start_on_login == 'none')
+        self.login_xdg_radio.setChecked(self.start_on_login == 'xdg')
+        login_layout.addWidget(self.login_none_radio)
+        login_layout.addWidget(self.login_xdg_radio)
+        login_group.setLayout(login_layout)
+        layout.addWidget(login_group)
+
+        self.start_routing_check = QCheckBox("Start routing automatically when app opens")
+        self.start_routing_check.setChecked(self.start_routing_on_launch)
+        layout.addWidget(self.start_routing_check)
+
+        self.close_to_tray_check = QCheckBox("Close to tray (minimize to system tray instead of quitting)")
+        self.close_to_tray_check.setChecked(self.close_to_tray)
+        self.close_to_tray_check.setToolTip("When enabled, closing the window hides the app to the tray; use tray menu to Show or Quit.")
+        layout.addWidget(self.close_to_tray_check)
+
+        shortcut_btn = QPushButton("Add to application menu")
+        shortcut_btn.setToolTip("Adds a launcher to your application menu (e.g. GNOME/KDE app grid) so you can start the app without a terminal.")
+        shortcut_btn.clicked.connect(self._on_create_app_menu_shortcut)
+        layout.addWidget(shortcut_btn)
+
+        apply_btn = QPushButton("Apply and save")
+        apply_btn.clicked.connect(self.apply_settings)
+        layout.addWidget(apply_btn)
+        layout.addStretch()
+        return widget
+
+    def _on_create_app_menu_shortcut(self):
+        p = _create_app_menu_shortcut()
+        if p:
+            QMessageBox.information(
+                self,
+                "Added to application menu",
+                "PipeWire Audio Router has been added to your application menu.\n\nYou can launch it from your app launcher (e.g. Activities, application grid) without using a terminal."
+            )
+            self.statusBar().showMessage("Added to application menu", 3000)
+        else:
+            QMessageBox.warning(
+                self,
+                "Could not add to menu",
+                "Failed to write the menu shortcut. Check that ~/.local/share/applications is writable."
+            )
+
+    def apply_settings(self):
+        """Save settings and apply autostart."""
+        start_on_login = 'xdg' if self.login_xdg_radio.isChecked() else 'none'
+        start_routing = self.start_routing_check.isChecked()
+        close_to_tray = self.close_to_tray_check.isChecked()
+        self.start_on_login = start_on_login
+        self.start_routing_on_launch = start_routing
+        self.close_to_tray = close_to_tray
+        _save_app_settings({
+            'start_on_login': start_on_login,
+            'start_routing_on_launch': start_routing,
+            'close_to_tray': close_to_tray,
+        })
+        exec_cmd = os.environ.get('AUDIO_ROUTER_LAUNCH_CMD', f'{sys.executable} -m run_app')
+        if start_on_login == 'xdg':
+            _set_autostart_enabled(True, exec_cmd)
+        else:
+            _set_autostart_enabled(False, exec_cmd)
+        self.update_service_status()
+        self.statusBar().showMessage("Settings saved", 2000)
+
     def start_background_updates(self):
         """Start background update threads"""
         # Device monitoring
@@ -464,16 +777,14 @@ class AudioRouterGUI(QMainWindow):
             # Status indicator
             status_icon = "🟢" if device.get('connected') else "🔴"
             self.devices_table.setItem(i, 0, QTableWidgetItem(status_icon))
-            
-            # Device name
-            self.devices_table.setItem(i, 1, QTableWidgetItem(device['name']))
-            
+            # Friendly name (fallback to name/id)
+            display_name = device.get('friendly_name') or device.get('name') or device.get('id', '')
+            self.devices_table.setItem(i, 1, QTableWidgetItem(display_name))
             # Device type
             device_type = device.get('device_type', 'unknown')
             type_icon = self.get_device_type_icon(device_type)
             self.devices_table.setItem(i, 2, QTableWidgetItem(f"{type_icon} {device_type}"))
-            
-            # Device ID
+            # Device ID (internal sink name)
             device_id = device['id'][:50] + '...' if len(device['id']) > 50 else device['id']
             self.devices_table.setItem(i, 3, QTableWidgetItem(device_id))
     
@@ -482,8 +793,14 @@ class AudioRouterGUI(QMainWindow):
         self.streams_table.setRowCount(len(streams))
         
         for i, stream in enumerate(streams):
-            # Application name
-            app_name = stream.get('application.name', 'Unknown')
+            # Application name (pactl: application.name in Properties)
+            app_name = (
+                stream.get('application_name')
+                or stream.get('application.name')
+                or stream.get('media.name')
+                or stream.get('node.name')
+                or 'Unknown'
+            )
             self.streams_table.setItem(i, 0, QTableWidgetItem(app_name))
             
             # Current output device
@@ -513,23 +830,21 @@ class AudioRouterGUI(QMainWindow):
         }
         return icons.get(device_type, '🔊')
     
+    def _router_running(self) -> bool:
+        return self.monitor_thread is not None and self.monitor_thread.isRunning()
+
     def update_service_status(self):
-        """Update service status indicator"""
-        try:
-            result = subprocess.run(
-                ['systemctl', '--user', 'is-active', 'pipewire-router'],
-                capture_output=True, text=True, timeout=2
-            )
-            
-            if result.returncode == 0:
-                self.status_label.setText("Service: 🟢 Running")
-                self.status_label.setStyleSheet("color: green; font-weight: bold; padding: 5px;")
-            else:
-                self.status_label.setText("Service: 🔴 Stopped")
-                self.status_label.setStyleSheet("color: red; font-weight: bold; padding: 5px;")
-        except Exception as e:
-            self.status_label.setText("Service: ⚠️ Unknown")
-            self.status_label.setStyleSheet("color: orange; font-weight: bold; padding: 5px;")
+        """Update router status and Start/Stop/Restart button states."""
+        running = self._router_running()
+        if running:
+            self.status_label.setText("Router: 🟢 Running")
+            self.status_label.setStyleSheet("color: green; font-weight: bold; padding: 5px;")
+        else:
+            self.status_label.setText("Router: 🔴 Stopped")
+            self.status_label.setStyleSheet("color: red; font-weight: bold; padding: 5px;")
+        self.start_btn.setEnabled(not running)
+        self.stop_btn.setEnabled(running)
+        self.restart_btn.setEnabled(running)
     
     def refresh_devices(self):
         """Manually refresh device list"""
@@ -574,11 +889,11 @@ class AudioRouterGUI(QMainWindow):
                 apps_text += f' (+{len(apps)-3} more)'
             self.rules_table.setItem(i, 1, QTableWidgetItem(apps_text))
             
-            # Target device
-            target = rule.get('target_device', 'Unknown')
-            # Shorten device ID
-            if len(target) > 30:
-                target = target[:27] + '...'
+            # Target device (show friendly name if known)
+            target_id = rule.get('target_device', '')
+            target = next((d.get('friendly_name') or d.get('name') for d in self.devices if d.get('id') == target_id), target_id or 'Unknown')
+            if len(target) > 40:
+                target = target[:37] + '...'
             self.rules_table.setItem(i, 2, QTableWidgetItem(target))
             
             # Fallback
@@ -676,80 +991,70 @@ class AudioRouterGUI(QMainWindow):
             logger.error(f"Error saving config: {e}")
             QMessageBox.critical(self, "Error", f"Failed to save configuration: {e}")
     
+    def _start_in_app_monitor(self):
+        """Start the router in-app (background thread)."""
+        if self.monitor_thread and self.monitor_thread.isRunning():
+            return
+        self.monitor_thread = MonitorThread(self.config_file)
+        self.monitor_thread.start()
+        self.update_service_status()
+
+    def _stop_in_app_monitor(self):
+        """Stop the in-app router thread."""
+        if not self.monitor_thread:
+            return
+        self.monitor_thread.stop()
+        self.monitor_thread.wait(10000)
+        self.monitor_thread = None
+        self.update_service_status()
+
     def start_service(self):
-        """Start the audio router service"""
-        try:
-            subprocess.run(['systemctl', '--user', 'start', 'pipewire-router'], check=True)
-            self.statusBar().showMessage("Service started", 2000)
-            self.update_service_status()
-        except Exception as e:
-            logger.error(f"Error starting service: {e}")
-            QMessageBox.critical(self, "Error", f"Failed to start service: {e}")
-    
+        """Start the router (in-app)."""
+        self._start_in_app_monitor()
+        self.statusBar().showMessage("Router started", 2000)
+
     def stop_service(self):
-        """Stop the audio router service"""
-        try:
-            subprocess.run(['systemctl', '--user', 'stop', 'pipewire-router'], check=True)
-            self.statusBar().showMessage("Service stopped", 2000)
-            self.update_service_status()
-        except Exception as e:
-            logger.error(f"Error stopping service: {e}")
-            QMessageBox.critical(self, "Error", f"Failed to stop service: {e}")
-    
+        """Stop the router."""
+        self._stop_in_app_monitor()
+        self.statusBar().showMessage("Router stopped", 2000)
+
     def restart_service(self):
-        """Restart the audio router service"""
-        try:
-            subprocess.run(['systemctl', '--user', 'restart', 'pipewire-router'], check=True)
-            self.statusBar().showMessage("Service restarted", 2000)
-            self.update_service_status()
-        except Exception as e:
-            logger.error(f"Error restarting service: {e}")
-            QMessageBox.critical(self, "Error", f"Failed to restart service: {e}")
+        """Restart the router."""
+        self._stop_in_app_monitor()
+        self._start_in_app_monitor()
+        self.statusBar().showMessage("Router restarted", 2000)
     
     def refresh_logs(self):
-        """Refresh service logs"""
-        try:
-            result = subprocess.run(
-                ['journalctl', '--user', '-u', 'pipewire-router', '--no-pager', '-n', '100'],
-                capture_output=True, text=True, timeout=5
-            )
-            
-            self.logs_text.setPlainText(result.stdout)
-            # Scroll to bottom
-            cursor = self.logs_text.textCursor()
-            cursor.movePosition(cursor.MoveOperation.End)
-            self.logs_text.setTextCursor(cursor)
-            
-        except Exception as e:
-            logger.error(f"Error refreshing logs: {e}")
-            self.logs_text.setPlainText(f"Error loading logs: {e}")
+        """Refresh log view (in-app buffer)."""
+        self.logs_text.setPlainText("\n".join(_log_buffer) if _log_buffer else "No log entries yet.")
+        cursor = self.logs_text.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self.logs_text.setTextCursor(cursor)
     
     def closeEvent(self, event):
-        """Clean up on window close"""
-        if self.device_thread:
-            self.device_thread.stop()
-            self.device_thread.wait()
-        
-        if self.stream_thread:
-            self.stream_thread.stop()
-            self.stream_thread.wait()
-        
+        """Close or hide to tray depending on preference."""
+        if self.close_to_tray and self.tray_icon and self.tray_icon.isVisible():
+            self.hide()
+            event.accept()
+            return
+        self._cleanup()
         event.accept()
+        # Actually quit when user closed the window (not hiding to tray)
+        QApplication.instance().quit()
 
 
 def main():
     """Main entry point"""
     logger.info("Starting Audio Router GUI")
     
-    # Create QApplication
     app = QApplication(sys.argv)
     app.setApplicationName("PipeWire Audio Router")
+    # Don't quit when window is closed; we hide to tray or quit explicitly
+    app.setQuitOnLastWindowClosed(False)
     
-    # Create and show main window
     window = AudioRouterGUI()
     window.show()
     
-    # Run event loop
     sys.exit(app.exec())
 
 

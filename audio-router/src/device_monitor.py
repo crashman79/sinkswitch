@@ -9,6 +9,7 @@ import json
 from typing import Dict, List, Optional, Callable
 from dataclasses import dataclass
 import time
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -199,7 +200,45 @@ class DeviceMonitor:
                 return self.set_bluetooth_profile(card_info['name'], profile)
         
         return False
-    
+
+    def _classify_device_type(self, device: Dict) -> str:
+        """Return a friendly type: bluetooth, usb_headset, hdmi, analog_speakers, unknown."""
+        text = f"{device.get('id', '')} {device.get('name', '')} {device.get('description', '')}".lower()
+        if 'bluez' in text or 'bluetooth' in text:
+            return 'bluetooth'
+        if 'usb' in text:
+            return 'usb_headset' if ('headset' in text or 'headphone' in text) else 'usb_speakers'
+        if 'hdmi' in text or 'displayport' in text:
+            return 'hdmi'
+        if 'analog' in text or 'line out' in text or 'built-in' in text:
+            return 'analog_speakers'
+        return 'unknown'
+
+    def _get_friendly_name(self, device: Dict) -> str:
+        """Return a short, human-readable name for the device."""
+        desc = device.get('description') or ''
+        name = device.get('name') or ''
+        dev_id = device.get('id') or ''
+        # Use description when it looks like a real name (not a long technical string)
+        if desc and len(desc) <= 60 and desc != name and not desc.startswith('alsa_'):
+            return desc.strip()
+        # Derive from id/name
+        text = (dev_id + ' ' + name).lower()
+        if 'bluez' in text:
+            return desc.strip() if desc else 'Bluetooth'
+        if 'hdmi' in text or 'displayport' in text:
+            return desc.strip() if desc else 'HDMI'
+        if 'usb' in text:
+            return desc.strip() if desc else 'USB Audio'
+        if 'analog' in text or 'alsa' in text:
+            return desc.strip() if desc else 'Built-in Audio'
+        return desc.strip() or name[:50] or dev_id[:50]
+
+    def _enrich_device(self, device: Dict) -> None:
+        """Set device_type and friendly_name on device dict."""
+        device['device_type'] = self._classify_device_type(device)
+        device['friendly_name'] = self._get_friendly_name(device)
+
     def _get_pipewire_devices(self) -> List[Dict]:
         """Get devices using PipeWire"""
         try:
@@ -219,9 +258,9 @@ class DeviceMonitor:
                 
                 if line.startswith('Sink #'):
                     if current_device:
+                        self._enrich_device(current_device)
                         devices.append(current_device)
                     current_device = {
-                        'device_type': 'Sink',
                         'properties': {},
                         'connected': True
                     }
@@ -243,6 +282,7 @@ class DeviceMonitor:
                         current_device['properties'][key] = value
             
             if current_device:
+                self._enrich_device(current_device)
                 devices.append(current_device)
             
             return devices
@@ -268,9 +308,9 @@ class DeviceMonitor:
                 
                 if line.startswith('Sink #'):
                     if current_device:
+                        self._enrich_device(current_device)
                         devices.append(current_device)
                     current_device = {
-                        'device_type': 'Sink',
                         'properties': {},
                         'connected': True  # Default to connected
                     }
@@ -292,6 +332,7 @@ class DeviceMonitor:
                         current_device['properties'][key] = value
             
             if current_device:
+                self._enrich_device(current_device)
                 devices.append(current_device)
             
             return devices
@@ -354,20 +395,21 @@ class DeviceMonitor:
         device = self.get_device_by_name(device_id)
         return device is not None and device.get('connected', False)
     
-    def watch_devices(self, callback: Callable, interval: int = 5, config_regen_callback: Optional[Callable] = None):
+    def watch_devices(self, callback: Callable, interval: int = 5, config_regen_callback: Optional[Callable] = None, stop_event: Optional[threading.Event] = None):
         """Watch for device changes and call callback when changes detected
-        
+
         Args:
             callback: Function to call when devices change
             interval: Polling interval in seconds
             config_regen_callback: Optional callback to regenerate config when significant devices change
+            stop_event: Optional threading.Event; when set, monitoring stops (for in-app run).
         """
         logger.info(f"Starting device monitoring (interval: {interval}s)")
         if config_regen_callback:
             logger.info("Config auto-regeneration enabled for bluetooth/USB device changes")
-        
+
         try:
-            while True:
+            while stop_event is None or not stop_event.is_set():
                 current_devices = self.get_devices()
                 current_streams = self._get_audio_streams()
                 
@@ -403,8 +445,12 @@ class DeviceMonitor:
                     self.last_devices = current_devices
                     self.last_streams = current_streams
                     callback()
-                
-                time.sleep(interval)
+
+                # Sleep in small steps so we can check stop_event promptly
+                for _ in range(interval):
+                    if stop_event and stop_event.is_set():
+                        break
+                    time.sleep(1)
         
         except KeyboardInterrupt:
             logger.info("Device monitoring stopped")
