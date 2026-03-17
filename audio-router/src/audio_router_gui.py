@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 # Bump when tagging a release
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 # Config base: set by run_app.py or default
 def _config_base() -> Path:
@@ -377,10 +377,12 @@ def _is_autostart_enabled() -> bool:
     return _autostart_desktop_path().exists()
 
 
-def _set_autostart_enabled(enabled: bool, exec_cmd: str) -> None:
+def _set_autostart_enabled(enabled: bool, exec_cmd: str, start_minimized: bool = False) -> None:
     path = _autostart_desktop_path()
     if enabled:
         path.parent.mkdir(parents=True, exist_ok=True)
+        if start_minimized:
+            exec_cmd = f"{exec_cmd} --minimized"
         content = f"""[Desktop Entry]
 Type=Application
 Name=PipeWire Audio Router
@@ -422,6 +424,7 @@ class AudioRouterGUI(QMainWindow):
         self.start_on_login = settings.get('start_on_login', 'none')
         self.start_routing_on_launch = settings.get('start_routing_on_launch', True)
         self.close_to_tray = settings.get('close_to_tray', False)
+        self.start_minimized = settings.get('start_minimized', False)
         self.monitor_thread: Optional[MonitorThread] = None
         self.device_thread = None
         self.stream_thread = None
@@ -724,6 +727,10 @@ class AudioRouterGUI(QMainWindow):
         self.login_xdg_radio.setChecked(self.start_on_login == 'xdg')
         login_layout.addWidget(self.login_none_radio)
         login_layout.addWidget(self.login_xdg_radio)
+        self.start_minimized_check = QCheckBox("Start minimized when launched at login")
+        self.start_minimized_check.setChecked(self.start_minimized)
+        self.start_minimized_check.setToolTip("When enabled, the window stays hidden (tray only) or minimized when the app is started at login.")
+        login_layout.addWidget(self.start_minimized_check)
         login_group.setLayout(login_layout)
         layout.addWidget(login_group)
 
@@ -798,17 +805,20 @@ class AudioRouterGUI(QMainWindow):
         start_on_login = 'xdg' if self.login_xdg_radio.isChecked() else 'none'
         start_routing = self.start_routing_check.isChecked()
         close_to_tray = self.close_to_tray_check.isChecked()
+        start_minimized = self.start_minimized_check.isChecked()
         self.start_on_login = start_on_login
         self.start_routing_on_launch = start_routing
         self.close_to_tray = close_to_tray
+        self.start_minimized = start_minimized
         _save_app_settings({
             'start_on_login': start_on_login,
             'start_routing_on_launch': start_routing,
             'close_to_tray': close_to_tray,
+            'start_minimized': start_minimized,
         })
         exec_cmd = os.environ.get('AUDIO_ROUTER_LAUNCH_CMD', f'{sys.executable} -m run_app')
         if start_on_login == 'xdg':
-            _set_autostart_enabled(True, exec_cmd)
+            _set_autostart_enabled(True, exec_cmd, start_minimized=start_minimized)
         else:
             _set_autostart_enabled(False, exec_cmd)
         self.update_service_status()
@@ -1177,8 +1187,14 @@ def main():
     app.setQuitOnLastWindowClosed(False)
     
     window = AudioRouterGUI()
-    window.show()
-    
+    if '--minimized' in sys.argv:
+        if window.tray_icon and window.tray_icon.isVisible():
+            window.hide()
+        else:
+            window.showMinimized()
+    else:
+        window.show()
+
     sys.exit(app.exec())
 
 
