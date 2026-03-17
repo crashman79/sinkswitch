@@ -26,11 +26,18 @@ if _FROZEN:
                     _data = f.read()
                 with open(_target, "wb") as f:
                     f.write(_data)
+                    f.flush()
+                    os.fsync(f.fileno())
                 _target.chmod(0o755)
-                _new_argv = [str(_target)] + [a for i, a in enumerate(_argv) if i != idx and i != idx + 1]
+                # Restart without --minimized so the window appears after update
+                _new_argv = [str(_target)] + [
+                    a for i, a in enumerate(_argv)
+                    if i != idx and i != idx + 1 and a != "--minimized"
+                ]
                 os.execv(str(_target), _new_argv)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Update apply failed: {e}", file=sys.stderr)
+                sys.exit(1)
         sys.exit(0)
 else:
     _APP_DIR = Path(__file__).resolve().parent
