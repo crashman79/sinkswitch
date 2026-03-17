@@ -11,6 +11,7 @@ import sys
 import os
 import json
 import logging
+import shutil
 import subprocess
 import threading
 import yaml
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 # Bump when tagging a release
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 # Config base: set by run_app.py or default
 def _config_base() -> Path:
@@ -350,6 +351,32 @@ def _applications_dir() -> Path:
     return Path.home() / ".local" / "share" / "applications"
 
 
+def _get_installable_binary_path() -> Optional[Path]:
+    """Path to the running binary when built as standalone (frozen). None when running from source or not a single file."""
+    launch = os.environ.get("AUDIO_ROUTER_LAUNCH_CMD", "").strip()
+    if not launch or " " in launch:
+        return None
+    p = Path(launch).resolve()
+    return p if p.is_file() and os.access(p, os.X_OK) else None
+
+
+def _install_binary_to_local_bin() -> tuple:
+    """Copy the current binary to ~/.local/bin/sinkswitch. Returns (success, message)."""
+    src = _get_installable_binary_path()
+    if not src:
+        return False, "Only available when running the built binary (e.g. ./dist/sinkswitch)."
+    dest_dir = Path.home() / ".local" / "bin"
+    dest = dest_dir / "sinkswitch"
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+        dest.chmod(0o755)
+        return True, f"Installed to {dest}\n\nIf ~/.local/bin is on your PATH, you can run 'sinkswitch' from anywhere."
+    except Exception as e:
+        logger.exception("Install to ~/.local/bin failed")
+        return False, str(e)
+
+
 def _create_app_menu_shortcut() -> Optional[Path]:
     """Add a .desktop entry to the application menu. Returns path or None on failure."""
     app_dir = _applications_dir()
@@ -434,6 +461,7 @@ class AudioRouterGUI(QMainWindow):
         self.start_routing_on_launch = settings.get('start_routing_on_launch', True)
         self.close_to_tray = settings.get('close_to_tray', False)
         self.start_minimized = settings.get('start_minimized', False)
+        self.offer_install_to_bin = settings.get('offer_install_to_bin', True)
         self.monitor_thread: Optional[MonitorThread] = None
         self.device_thread = None
         self.stream_thread = None
@@ -445,6 +473,40 @@ class AudioRouterGUI(QMainWindow):
         self.update_service_status()
         if self.start_routing_on_launch and self.config_file.exists():
             self._start_in_app_monitor()
+        QTimer.singleShot(500, self._maybe_offer_install_to_bin)
+
+    def _maybe_offer_install_to_bin(self):
+        """Once per install: offer to copy binary to ~/.local/bin if not already there."""
+        if not self.offer_install_to_bin:
+            return
+        src = _get_installable_binary_path()
+        if not src:
+            return
+        local_bin = Path.home() / ".local" / "bin" / "sinkswitch"
+        if src.resolve() == local_bin.resolve():
+            return
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Install SinkSwitch")
+        msg.setText("Copy SinkSwitch to ~/.local/bin so you can run it from anywhere?")
+        msg.setInformativeText("If ~/.local/bin is on your PATH, you can run 'sinkswitch' from the terminal or app launcher.")
+        copy_btn = msg.addButton("Copy to ~/.local/bin", QMessageBox.ButtonRole.AcceptRole)
+        later_btn = msg.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        dont_btn = msg.addButton("Don't ask again", QMessageBox.ButtonRole.ActionRole)
+        msg.setDefaultButton(copy_btn)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == dont_btn:
+            self.offer_install_to_bin = False
+            _save_app_settings({**_load_app_settings(), 'offer_install_to_bin': False})
+        elif clicked == copy_btn:
+            ok, text = _install_binary_to_local_bin()
+            self.offer_install_to_bin = False
+            _save_app_settings({**_load_app_settings(), 'offer_install_to_bin': False})
+            if ok:
+                QMessageBox.information(self, "Installed", text)
+                self.statusBar().showMessage("Binary installed to ~/.local/bin/sinkswitch", 5000)
+            else:
+                QMessageBox.warning(self, "Install failed", text)
 
     def _setup_tray(self):
         """Create system tray icon if available."""
@@ -752,6 +814,18 @@ class AudioRouterGUI(QMainWindow):
         self.close_to_tray_check.setToolTip("When enabled, closing the window hides the app to the tray; use tray menu to Show or Quit.")
         layout.addWidget(self.close_to_tray_check)
 
+        install_group = QGroupBox("Install binary to a standard location")
+        install_layout = QVBoxLayout()
+        install_layout.addWidget(QLabel("Copy the app binary to ~/.local/bin so you can run 'sinkswitch' from anywhere (if that directory is on your PATH)."))
+        self.install_bin_btn = QPushButton("Copy to ~/.local/bin")
+        self.install_bin_btn.setToolTip("Only available when running the built binary (e.g. ./dist/sinkswitch).")
+        self.install_bin_btn.clicked.connect(self._on_install_to_local_bin)
+        if not _get_installable_binary_path():
+            self.install_bin_btn.setEnabled(False)
+        install_layout.addWidget(self.install_bin_btn)
+        install_group.setLayout(install_layout)
+        layout.addWidget(install_group)
+
         btn_row = QHBoxLayout()
         shortcut_btn = QPushButton("Add to application menu")
         shortcut_btn.setToolTip("Adds a launcher to your application menu (e.g. GNOME/KDE app grid) so you can start the app without a terminal.")
@@ -803,6 +877,14 @@ class AudioRouterGUI(QMainWindow):
         layout.addStretch()
         return widget
 
+    def _on_install_to_local_bin(self):
+        ok, msg = _install_binary_to_local_bin()
+        if ok:
+            QMessageBox.information(self, "Installed", msg)
+            self.statusBar().showMessage("Binary installed to ~/.local/bin/sinkswitch", 5000)
+        else:
+            QMessageBox.warning(self, "Install failed", msg)
+
     def _on_create_app_menu_shortcut(self):
         p = _create_app_menu_shortcut()
         if p:
@@ -834,6 +916,7 @@ class AudioRouterGUI(QMainWindow):
             'start_routing_on_launch': start_routing,
             'close_to_tray': close_to_tray,
             'start_minimized': start_minimized,
+            'offer_install_to_bin': getattr(self, 'offer_install_to_bin', True),
         })
         exec_cmd = os.environ.get('AUDIO_ROUTER_LAUNCH_CMD', f'{sys.executable} -m run_app')
         if start_on_login == 'xdg':
