@@ -6,7 +6,7 @@ Device monitoring module for detecting and tracking audio output devices
 import logging
 import subprocess
 import json
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Set
 from dataclasses import dataclass
 import time
 import threading
@@ -420,67 +420,144 @@ class DeviceMonitor:
         device = self.get_device_by_name(device_id)
         return device is not None and device.get('connected', False)
     
-    def watch_devices(self, callback: Callable, interval: int = 5, config_regen_callback: Optional[Callable] = None, stop_event: Optional[threading.Event] = None):
-        """Watch for device changes and call callback when changes detected
+    def _run_watch_iteration(
+        self,
+        callback: Callable,
+        config_regen_callback: Optional[Callable],
+        rules_ref: Optional[List[Dict]],
+    ) -> None:
+        """One iteration: fetch state, optional config regen, relevance check, callback if needed."""
+        current_devices = self.get_devices()
+        current_streams = self._get_audio_streams()
 
-        Args:
-            callback: Function to call when devices change
-            interval: Polling interval in seconds
-            config_regen_callback: Optional callback to regenerate config when significant devices change
-            stop_event: Optional threading.Event; when set, monitoring stops (for in-app run).
+        self._monitor_bluetooth_profiles(current_devices)
+
+        if config_regen_callback and self._is_significant_device_change(current_devices):
+            time_since_last = time.time() - self.last_config_regeneration
+            if time_since_last >= self.config_regeneration_cooldown:
+                logger.info("Triggering config regeneration due to significant device change")
+                try:
+                    config_regen_callback()
+                    self.last_config_regeneration = time.time()
+                except Exception as e:
+                    logger.error(f"Failed to regenerate config: {e}")
+            else:
+                logger.debug("Skipping config regeneration (cooldown)")
+
+        device_changed = self._devices_changed(current_devices)
+        stream_changed = self._streams_changed(current_streams)
+        if rules_ref:
+            rule_target_ids = self._get_rule_target_device_ids(rules_ref)
+            device_changed = device_changed and rule_target_ids and self._device_change_involves_rules(current_devices, rule_target_ids)
+            stream_changed = stream_changed and self._stream_change_involves_rules(current_streams, rules_ref)
+
+        if device_changed or stream_changed:
+            if device_changed and stream_changed:
+                logger.info("Devices and audio streams changed - applying routing rules")
+            elif device_changed:
+                logger.info("Device configuration changed - applying routing rules")
+            else:
+                logger.info("Audio streams changed - applying routing rules")
+            self.last_devices = current_devices
+            self.last_streams = current_streams
+            callback()
+
+    def watch_devices(self, callback: Callable, interval: int = 5, config_regen_callback: Optional[Callable] = None, stop_event: Optional[threading.Event] = None, rules_ref: Optional[List[Dict]] = None):
+        """Watch for device changes and call callback when changes detected.
+
+        Uses pactl subscribe (event-based) when available for low latency and no polling;
+        falls back to polling every interval seconds if subscribe is unavailable.
         """
-        logger.info(f"Starting device monitoring (interval: {interval}s)")
+        if self._try_watch_via_pactl_subscribe(callback, config_regen_callback, stop_event, rules_ref, interval):
+            return
+        logger.info("Event-based monitoring unavailable, using polling (interval=%ss)", interval)
         if config_regen_callback:
             logger.info("Config auto-regeneration enabled for bluetooth/USB device changes")
-
         try:
             while stop_event is None or not stop_event.is_set():
-                current_devices = self.get_devices()
-                current_streams = self._get_audio_streams()
-                
-                # Monitor Bluetooth profiles and restore A2DP when possible
-                self._monitor_bluetooth_profiles(current_devices)
-                
-                # Check for significant device changes (bluetooth/USB connecting/disconnecting)
-                if config_regen_callback and self._is_significant_device_change(current_devices):
-                    # Rate limit config regeneration
-                    time_since_last = time.time() - self.last_config_regeneration
-                    if time_since_last >= self.config_regeneration_cooldown:
-                        logger.info(f"Triggering config regeneration due to significant device change")
-                        try:
-                            config_regen_callback()
-                            self.last_config_regeneration = time.time()
-                        except Exception as e:
-                            logger.error(f"Failed to regenerate config: {e}")
-                    else:
-                        logger.debug(f"Skipping config regeneration (cooldown: {self.config_regeneration_cooldown - time_since_last:.1f}s remaining)")
-                
-                # Check if device list or audio streams changed
-                device_changed = self._devices_changed(current_devices)
-                stream_changed = self._streams_changed(current_streams)
-                
-                if device_changed or stream_changed:
-                    if device_changed and stream_changed:
-                        logger.info("Devices and audio streams changed - applying routing rules")
-                    elif device_changed:
-                        logger.info("Device configuration changed - applying routing rules")
-                    else:
-                        logger.info("Audio streams changed - applying routing rules")
-                    
-                    self.last_devices = current_devices
-                    self.last_streams = current_streams
-                    callback()
-
-                # Sleep in small steps so we can check stop_event promptly
+                self._run_watch_iteration(callback, config_regen_callback, rules_ref)
                 for _ in range(interval):
                     if stop_event and stop_event.is_set():
                         break
                     time.sleep(1)
-        
         except KeyboardInterrupt:
             logger.info("Device monitoring stopped")
         except Exception as e:
             logger.error(f"Error during device monitoring: {e}")
+
+    def _try_watch_via_pactl_subscribe(
+        self,
+        callback: Callable,
+        config_regen_callback: Optional[Callable],
+        stop_event: Optional[threading.Event],
+        rules_ref: Optional[List[Dict]],
+        poll_interval_fallback: int,
+    ) -> bool:
+        """Run watch loop driven by pactl subscribe events. Returns True if we ran to completion (or stop)."""
+        try:
+            proc = subprocess.Popen(
+                ['pactl', 'subscribe'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+        except (FileNotFoundError, OSError) as e:
+            logger.debug("pactl subscribe not available: %s", e)
+            return False
+        event_occurred = threading.Event()
+        debounce_sec = 0.5
+        bt_interval_sec = 30.0
+        last_bt = time.time()
+
+        def read_events():
+            try:
+                for line in proc.stdout:
+                    if stop_event and stop_event.is_set():
+                        break
+                    line = (line or '').strip().lower()
+                    if not line or line.startswith('Event '):
+                        continue
+                    if 'sink' in line or 'server' in line:
+                        event_occurred.set()
+            except Exception as e:
+                logger.debug("pactl subscribe read error: %s", e)
+            finally:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
+        reader = threading.Thread(target=read_events, daemon=True)
+        reader.start()
+        logger.info("Device monitoring using pactl subscribe (event-based)")
+
+        try:
+            while stop_event is None or not stop_event.is_set():
+                if proc.poll() is not None:
+                    logger.info("pactl subscribe exited, falling back to polling")
+                    return False
+                now = time.time()
+                timeout = min(debounce_sec, max(0.1, bt_interval_sec - (now - last_bt)))
+                timeout = max(0.1, min(timeout, 1.0))
+                if event_occurred.wait(timeout=timeout):
+                    event_occurred.clear()
+                    time.sleep(debounce_sec)
+                    if stop_event and stop_event.is_set():
+                        break
+                    self._run_watch_iteration(callback, config_regen_callback, rules_ref)
+                if now - last_bt >= bt_interval_sec:
+                    last_bt = now
+                    self._run_watch_iteration(callback, config_regen_callback, rules_ref)
+        except KeyboardInterrupt:
+            logger.info("Device monitoring stopped")
+        finally:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:
+                pass
+        return True
     
     def _devices_changed(self, current_devices: List[Dict]) -> bool:
         """Check if device list has changed"""
@@ -563,6 +640,64 @@ class DeviceMonitor:
         last_apps = sorted([s.get('application_name', '') for s in self.last_streams])
         
         return current_apps != last_apps
+
+    def _get_rule_target_device_ids(self, rules: List[Dict]) -> Set[str]:
+        """Set of device ids that are targets of any rule (including variants)."""
+        out: Set[str] = set()
+        for r in rules:
+            tid = r.get('target_device')
+            if tid:
+                out.add(tid)
+            for v in r.get('target_device_variants') or []:
+                out.add(v)
+        return out
+
+    def _device_change_involves_rules(self, current_devices: List[Dict], rule_target_ids: Set[str]) -> bool:
+        """True if connection state changed for any device that is a rule target."""
+        if not rule_target_ids:
+            return True
+        last_by_id = {d['id']: d for d in self.last_devices}
+        for d in current_devices:
+            did = d.get('id')
+            if did not in rule_target_ids:
+                continue
+            old = last_by_id.get(did)
+            if old is None:
+                return True  # new rule-target device appeared
+            if d.get('connected') != old.get('connected'):
+                return True
+        for did in rule_target_ids:
+            if did in last_by_id and did not in {d['id'] for d in current_devices}:
+                return True  # rule-target device disappeared
+        return False
+
+    @staticmethod
+    def _app_matches_rule(app_name: str, rule: Dict) -> bool:
+        """True if app_name matches the rule's applications or keywords."""
+        app_lower = (app_name or '').lower()
+        for a in rule.get('applications') or []:
+            if a.lower() in app_lower or app_lower in a.lower():
+                return True
+        for kw in rule.get('application_keywords') or []:
+            if kw.lower() in app_lower:
+                return True
+        return False
+
+    def _stream_change_involves_rules(self, current_streams: List[Dict], rules_ref: List[Dict]) -> bool:
+        """True if the set of streams that match any rule has changed."""
+        if not rules_ref:
+            return True
+        current_matching = frozenset(
+            s.get('application_name') or ''
+            for s in current_streams
+            if any(self._app_matches_rule(s.get('application_name') or '', r) for r in rules_ref)
+        )
+        last_matching = frozenset(
+            s.get('application_name') or ''
+            for s in self.last_streams
+            if any(self._app_matches_rule(s.get('application_name') or '', r) for r in rules_ref)
+        )
+        return current_matching != last_matching
     
     def _is_significant_device_change(self, current_devices: List[Dict]) -> bool:
         """Check if device changes are significant enough to trigger config regeneration

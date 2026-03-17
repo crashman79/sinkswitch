@@ -116,7 +116,8 @@ class AudioRouterEngine:
             return {
                 'rule_name': rule_name,
                 'success': True,
-                'message': f"Successfully routed {routed} stream(s) to {connected_target}"
+                'routed_count': routed,
+                'message': f"Successfully routed {routed} stream(s) to {connected_target}",
             }
         
         except Exception as e:

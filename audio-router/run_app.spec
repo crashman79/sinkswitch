@@ -1,4 +1,4 @@
-# PyInstaller spec for PipeWire Audio Router
+# PyInstaller spec for SinkSwitch
 # Build: pyinstaller run_app.spec   (or ./build.sh)
 
 from pathlib import Path
@@ -33,7 +33,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='pipewire-audio-router',
+    name='sinkswitch',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

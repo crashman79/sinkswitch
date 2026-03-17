@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=PipeWire Audio Router
-GenericName=Audio Router Control
-Comment=Configure automatic audio routing based on applications
+Name=SinkSwitch
+GenericName=Per-app audio routing
+Comment=Route application audio to different outputs (PipeWire/PulseAudio)
 Exec=/home/crashman79/.config/pipewire-router/launch-gui.sh
 Icon=audio-card
 Terminal=false

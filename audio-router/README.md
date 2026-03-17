@@ -1,6 +1,6 @@
-# PipeWire Audio Router (source)
+# SinkSwitch (source)
 
-This folder contains the source and build files for PipeWire Audio Router. For install and run instructions, see the [root README](../README.md).
+This folder contains the source and build files for SinkSwitch. For install and run instructions, see the [root README](../README.md).
 
 ## Run from source
 
@@ -13,8 +13,14 @@ python3 run_app.py
 
 ```bash
 ./build.sh
-./dist/pipewire-audio-router
+./dist/sinkswitch
 ```
+
+## Default behavior (out of the box)
+
+- **First run** — If no config exists, the app auto-generates initial routing rules from connected devices (browsers, meetings, media, etc. → Bluetooth/USB headset when available). Edit or remove them in the Routing Rules tab.
+- **Router off until Start** — Until you click **Start**, all audio uses the system default; the app does not change routing.
+- **Default output** — When the router is running, any stream that does not match a rule is sent to the **Default output** selected in the toolbar.
 
 ## Config and rules
 

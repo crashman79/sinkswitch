@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build a standalone binary with PyInstaller.
 # Uses a project venv so no system pip/pyinstaller needed (works on Arch etc.).
-# Output: dist/pipewire-audio-router
+# Output: dist/sinkswitch
 
 set -e
 cd "$(dirname "$0")"
@@ -19,6 +19,6 @@ echo "Using venv: $VENV_DIR"
 "$VENV_DIR/bin/python" -m PyInstaller run_app.spec
 
 echo ""
-echo "Done. Binary: dist/pipewire-audio-router"
-echo "Run: ./dist/pipewire-audio-router"
-echo "Or move dist/pipewire-audio-router to your PATH or Desktop."
+echo "Done. Binary: dist/sinkswitch"
+echo "Run: ./dist/sinkswitch"
+echo "Or move dist/sinkswitch to your PATH or Desktop."

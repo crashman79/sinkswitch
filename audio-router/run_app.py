@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Standalone launcher for PipeWire Audio Router.
+Standalone launcher for SinkSwitch.
 - As script:  python3 run_app.py  (from audio-router directory)
-- As binary:  ./pipewire-audio-router  (after building with build.sh)
+- As binary:  ./sinkswitch  (after building with build.sh)
 
 Config on first run: ~/.config/pipewire-router/ (or AUDIO_ROUTER_CONFIG).
 """

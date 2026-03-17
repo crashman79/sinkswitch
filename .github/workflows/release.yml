@@ -33,8 +33,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pipewire-audio-router-linux-x64
-          path: audio-router/dist/pipewire-audio-router
+          name: sinkswitch-linux-x64
+          path: audio-router/dist/sinkswitch
 
   release:
     needs: build-linux
@@ -49,12 +49,12 @@ jobs:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: pipewire-audio-router-linux-x64
+          name: sinkswitch-linux-x64
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: pipewire-audio-router
+          files: sinkswitch
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

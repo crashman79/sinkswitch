@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PipeWire Audio Router – standalone GUI app.
+SinkSwitch – standalone GUI app for per-app audio routing.
 Device monitoring and routing run inside this app; no systemd or install script required.
 
 Requirements: Python 3.8+, PyQt6, PyYAML (pip install -r requirements.txt)
@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 # Bump when tagging a release
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 # Config base: set by run_app.py or default
 def _config_base() -> Path:
@@ -169,6 +169,8 @@ class StreamMonitorThread(QThread):
 
 class MonitorThread(QThread):
     """Runs the audio router monitor loop in the background (in-app mode)."""
+    routing_notification = pyqtSignal(str, str)  # title, message
+
     def __init__(self, config_file: Path):
         super().__init__()
         self.config_file = config_file
@@ -196,12 +198,19 @@ class MonitorThread(QThread):
                     logger.error(f"Failed to regenerate config: {e}")
 
             def apply_rules():
-                engine.apply_rules(rules_ref)
+                results = engine.apply_rules(rules_ref)
+                for r in results:
+                    if r.get('success') and r.get('routed_count', 0) > 0:
+                        self.routing_notification.emit(
+                            "Audio Router",
+                            f"{r.get('rule_name', 'Route')}: {r.get('message', '')}",
+                        )
 
             monitor.watch_devices(
                 apply_rules,
                 config_regen_callback=regenerate_and_reload,
-                stop_event=self.stop_event
+                stop_event=self.stop_event,
+                rules_ref=rules_ref,
             )
         except Exception as e:
             logger.error(f"Monitor error: {e}")
@@ -345,13 +354,13 @@ def _create_app_menu_shortcut() -> Optional[Path]:
     """Add a .desktop entry to the application menu. Returns path or None on failure."""
     app_dir = _applications_dir()
     app_dir.mkdir(parents=True, exist_ok=True)
-    path = app_dir / "pipewire-audio-router.desktop"
+    path = app_dir / "sinkswitch.desktop"
     exec_cmd = os.environ.get("AUDIO_ROUTER_LAUNCH_CMD", f"{sys.executable} -m run_app")
     work_dir = os.environ.get("AUDIO_ROUTER_WORKING_DIR", str(Path.home()))
     path_line = f"Path={work_dir}\n" if work_dir else ""
     content = f"""[Desktop Entry]
 Type=Application
-Name=PipeWire Audio Router
+Name=SinkSwitch
 Comment=Automatic audio routing for PipeWire/PulseAudio
 Exec={exec_cmd}
 {path_line}Icon=audio-card
@@ -370,7 +379,7 @@ StartupNotify=true
 
 
 def _autostart_desktop_path() -> Path:
-    return Path.home() / '.config/autostart/pipewire-audio-router.desktop'
+    return Path.home() / '.config/autostart/sinkswitch.desktop'
 
 
 def _is_autostart_enabled() -> bool:
@@ -385,7 +394,7 @@ def _set_autostart_enabled(enabled: bool, exec_cmd: str, start_minimized: bool =
             exec_cmd = f"{exec_cmd} --minimized"
         content = f"""[Desktop Entry]
 Type=Application
-Name=PipeWire Audio Router
+Name=SinkSwitch
 Comment=Automatic audio routing (launched at login)
 Exec={exec_cmd}
 Icon=audio-card
@@ -444,7 +453,7 @@ class AudioRouterGUI(QMainWindow):
             return
         self.tray_icon = QSystemTrayIcon(QApplication.instance())
         self.tray_icon.setIcon(self._tray_icon_pixmap())
-        self.tray_icon.setToolTip("PipeWire Audio Router")
+        self.tray_icon.setToolTip("SinkSwitch")
         self.tray_menu = QMenu()
         show_act = self.tray_menu.addAction("Show")
         show_act.triggered.connect(self._show_from_tray)
@@ -511,7 +520,7 @@ class AudioRouterGUI(QMainWindow):
     
     def init_ui(self):
         """Initialize the user interface"""
-        self.setWindowTitle("PipeWire Audio Router")
+        self.setWindowTitle("SinkSwitch")
         self.setMinimumSize(960, 560)
         self.resize(1000, 620)
         
@@ -763,17 +772,26 @@ class AudioRouterGUI(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout()
         widget.setLayout(layout)
-        layout.addWidget(QLabel("<b>PipeWire Audio Router</b>"))
+        layout.addWidget(QLabel("<b>SinkSwitch</b>"))
         layout.addWidget(QLabel(f"Version {__version__}"))
+        layout.addSpacing(12)
+        layout.addWidget(QLabel("<b>Default routing (out of the box)</b>"))
+        layout.addWidget(QLabel(
+            "On first run, SinkSwitch creates a config and may auto-generate routing rules from your connected devices "
+            "(e.g. browsers, meetings, media → Bluetooth or USB headset). You can edit or remove these in the Routing Rules tab. "
+            "Until you click <b>Start</b>, the router does nothing. Once running, matched streams follow rules; "
+            "everything else goes to the <b>Default output</b> in the toolbar."
+        ))
         layout.addSpacing(12)
         layout.addWidget(QLabel("<b>Technology</b>"))
         layout.addWidget(QLabel("• Python 3, PyQt6 (GUI)"))
         layout.addWidget(QLabel("• PipeWire / PulseAudio (pactl)"))
         layout.addWidget(QLabel("• YAML config, XDG autostart"))
         layout.addSpacing(8)
-        layout.addWidget(QLabel("<b>Paths</b>"))
-        layout.addWidget(QLabel(f"Config: {self.config_base}"))
-        layout.addWidget(QLabel(f"Rules: {self.config_file}"))
+        layout.addWidget(QLabel("<b>Config and routing rules</b>"))
+        layout.addWidget(QLabel("All settings and the rules file are stored under the config directory. Override with the environment variable AUDIO_ROUTER_CONFIG if needed."))
+        layout.addWidget(QLabel(f"Config directory: {self.config_base}"))
+        layout.addWidget(QLabel(f"Routing rules file: {self.config_file}"))
         layout.addSpacing(8)
         layout.addWidget(QLabel(f"<b>Routing rules</b>: {len(self.rules)}"))
         layout.addSpacing(8)
@@ -790,7 +808,7 @@ class AudioRouterGUI(QMainWindow):
             QMessageBox.information(
                 self,
                 "Added to application menu",
-                "PipeWire Audio Router has been added to your application menu.\n\nYou can launch it from your app launcher (e.g. Activities, application grid) without using a terminal."
+                "SinkSwitch has been added to your application menu.\n\nYou can launch it from your app launcher (e.g. Activities, application grid) without using a terminal."
             )
             self.statusBar().showMessage("Added to application menu", 3000)
         else:
@@ -1130,8 +1148,14 @@ class AudioRouterGUI(QMainWindow):
         if self.monitor_thread and self.monitor_thread.isRunning():
             return
         self.monitor_thread = MonitorThread(self.config_file)
+        self.monitor_thread.routing_notification.connect(self._on_routing_notification)
         self.monitor_thread.start()
         self.update_service_status()
+
+    def _on_routing_notification(self, title: str, message: str):
+        """Show a tray balloon when the router moves a stream."""
+        if self.tray_icon and self.tray_icon.isVisible():
+            self.tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 4000)
 
     def _stop_in_app_monitor(self):
         """Stop the in-app router thread."""
@@ -1182,7 +1206,7 @@ def main():
     logger.info("Starting Audio Router GUI")
     
     app = QApplication(sys.argv)
-    app.setApplicationName("PipeWire Audio Router")
+    app.setApplicationName("SinkSwitch")
     # Don't quit when window is closed; we hide to tray or quit explicitly
     app.setQuitOnLastWindowClosed(False)
     
