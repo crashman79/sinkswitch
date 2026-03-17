@@ -28,7 +28,7 @@ UPDATES_NEW_BINARY = UPDATES_CACHE_DIR / "sinkswitch.new"
 _SINGLE_INSTANCE_LOCK_FILE = None  # hold open for process lifetime
 
 # Bump when tagging a release
-__version__ = "0.7.3"
+__version__ = "0.7.5"
 
 # Config base: set by run_app.py or default
 def _acquire_single_instance_lock() -> bool:
@@ -482,14 +482,27 @@ def _update_download(download_url: str) -> Tuple[bool, str]:
 
 
 def _update_restart_to_apply() -> Tuple[bool, str]:
-    """Exec the .new binary with --replace-and-run and exit. Returns (True, '') if we're about to exit; (False, error) otherwise."""
+    """Spawn an updater script and exit; script waits for us to exit, replaces binary, then launches. Returns (True, '') if we're about to exit."""
     if not UPDATES_NEW_BINARY.exists():
         return False, "No downloaded update found."
     current = _get_installable_binary_path()
     if not current:
         return False, "Restart is only available when running the built binary."
     try:
-        os.execv(str(UPDATES_NEW_BINARY), [str(UPDATES_NEW_BINARY), "--replace-and-run", str(current)])
+        import tempfile
+        script = tempfile.NamedTemporaryFile(
+            mode="w", prefix="sinkswitch-update-", suffix=".sh", delete=False
+        )
+        script.write(
+            "#!/bin/sh\n"
+            "sleep 1\n"
+            'cp "$1" "$2" && chmod 755 "$2"\n'
+            'rm -f "$0"\n'
+            'exec "$2"\n'
+        )
+        script.close()
+        os.chmod(script.name, 0o755)
+        os.execv("/bin/sh", ["/bin/sh", script.name, str(UPDATES_NEW_BINARY), str(current)])
     except Exception as e:
         return False, str(e)
     return True, ""
