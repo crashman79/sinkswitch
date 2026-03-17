@@ -28,7 +28,7 @@ UPDATES_NEW_BINARY = UPDATES_CACHE_DIR / "sinkswitch.new"
 _SINGLE_INSTANCE_LOCK_FILE = None  # hold open for process lifetime
 
 # Bump when tagging a release
-__version__ = "0.7.8"
+__version__ = "0.7.9"
 
 # Config base: set by run_app.py or default
 def _acquire_single_instance_lock() -> bool:
@@ -495,10 +495,11 @@ def _update_restart_to_apply() -> Tuple[bool, str]:
         script = tempfile.NamedTemporaryFile(
             mode="w", prefix="sinkswitch-update-", suffix=".sh", delete=False
         )
-        # Only exec if cp succeeds; otherwise we'd run the old binary again
+        # Remove target first to avoid 'Text file busy' when overwriting; then copy and exec
         script.write(
             "#!/bin/sh\n"
             "sleep 1\n"
+            'rm -f "$2"\n'
             'cp "$1" "$2" && chmod 755 "$2" && exec "$2"\n'
             'rm -f "$0"\n'
             "exit 1\n"
