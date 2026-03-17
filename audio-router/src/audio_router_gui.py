@@ -28,7 +28,7 @@ UPDATES_NEW_BINARY = UPDATES_CACHE_DIR / "sinkswitch.new"
 _SINGLE_INSTANCE_LOCK_FILE = None  # hold open for process lifetime
 
 # Bump when tagging a release
-__version__ = "0.7.5"
+__version__ = "0.7.7"
 
 # Config base: set by run_app.py or default
 def _acquire_single_instance_lock() -> bool:
@@ -488,21 +488,24 @@ def _update_restart_to_apply() -> Tuple[bool, str]:
     current = _get_installable_binary_path()
     if not current:
         return False, "Restart is only available when running the built binary."
+    path_new = UPDATES_NEW_BINARY.resolve()
+    path_current = current.resolve()
     try:
         import tempfile
         script = tempfile.NamedTemporaryFile(
             mode="w", prefix="sinkswitch-update-", suffix=".sh", delete=False
         )
+        # Only exec if cp succeeds; otherwise we'd run the old binary again
         script.write(
             "#!/bin/sh\n"
             "sleep 1\n"
-            'cp "$1" "$2" && chmod 755 "$2"\n'
+            'cp "$1" "$2" && chmod 755 "$2" && exec "$2"\n'
             'rm -f "$0"\n'
-            'exec "$2"\n'
+            "exit 1\n"
         )
         script.close()
         os.chmod(script.name, 0o755)
-        os.execv("/bin/sh", ["/bin/sh", script.name, str(UPDATES_NEW_BINARY), str(current)])
+        os.execv("/bin/sh", ["/bin/sh", script.name, str(path_new), str(path_current)])
     except Exception as e:
         return False, str(e)
     return True, ""
