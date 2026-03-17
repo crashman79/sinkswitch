@@ -4,7 +4,7 @@
 # The system automatically generates routing rules based on your connected devices.
 #
 # To see your actual auto-generated config:
-#   cat ~/.config/pipewire-router/config/routing_rules.yaml
+#   cat ~/.config/sinkswitch/config/routing_rules.yaml
 #
 # Manual configuration is optional - only edit if you want different routing than auto-generated.
 # Find device IDs: pactl list sinks | grep "Name:"

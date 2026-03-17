@@ -14,7 +14,7 @@ Route application audio to different outputs (Bluetooth, USB, HDMI, etc.) by rul
 
 1. **Download** the Linux binary from [Releases](https://github.com/crashman79/bluetooth-audio-router/releases).
 2. **Run** it (e.g. `chmod +x sinkswitch && ./sinkswitch`).
-3. On first run the app creates config at `~/.config/pipewire-router/`. Use the GUI to add routing rules and start the router. **Settings** → Add to application menu or launch at login if you like.
+3. On first run the app creates config at `~/.config/sinkswitch/`. Use the GUI to add routing rules and start the router. **Settings** → Add to application menu or launch at login if you like.
 
 ## Run from source
 
@@ -24,7 +24,7 @@ pip install -r requirements.txt
 python3 run_app.py
 ```
 
-Same config and behavior; config dir is `~/.config/pipewire-router/` (or set `AUDIO_ROUTER_CONFIG`).
+Same config and behavior; config dir is `~/.config/sinkswitch/` (or set `AUDIO_ROUTER_CONFIG`).
 
 ### Build the binary yourself
 

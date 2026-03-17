@@ -2,12 +2,12 @@
 # 
 # NOTE: This is a REFERENCE example. The system automatically generates routing
 # rules based on your connected devices. To see your actual auto-generated config:
-#   cat ~/.config/pipewire-router/config/routing_rules.yaml
+#   cat ~/.config/sinkswitch/config/routing_rules.yaml
 #
 # To regenerate based on current devices:
-#   ~/.config/pipewire-router/venv/bin/python3 \
-#     ~/.config/pipewire-router/src/audio_router.py \
-#     generate-config --output ~/.config/pipewire-router/config/routing_rules.yaml
+#   ~/.config/sinkswitch/venv/bin/python3 \
+#     ~/.config/sinkswitch/src/audio_router.py \
+#     generate-config --output ~/.config/sinkswitch/config/routing_rules.yaml
 
 routing_rules:
   # Example: Route browsers to Bluetooth headset

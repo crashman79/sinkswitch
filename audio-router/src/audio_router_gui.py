@@ -18,12 +18,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 # Bump when tagging a release
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 # Config base: set by run_app.py or default
 def _config_base() -> Path:
     p = os.environ.get("AUDIO_ROUTER_CONFIG")
-    return Path(p) if p else Path.home() / ".config" / "pipewire-router"
+    return Path(p) if p else Path.home() / ".config" / "sinkswitch"
 
 # In-memory log capture for standalone (no journal)
 _log_buffer: List[str] = []
@@ -793,7 +793,8 @@ class AudioRouterGUI(QMainWindow):
         layout.addWidget(QLabel(f"Config directory: {self.config_base}"))
         layout.addWidget(QLabel(f"Routing rules file: {self.config_file}"))
         layout.addSpacing(8)
-        layout.addWidget(QLabel(f"<b>Routing rules</b>: {len(self.rules)}"))
+        self.about_rules_count_label = QLabel(f"<b>Routing rules</b>: {len(self.rules)}")
+        layout.addWidget(self.about_rules_count_label)
         layout.addSpacing(8)
         layout.addWidget(QLabel("<b>Feedback</b>"))
         feedback_label = QLabel('<a href="mailto:githubfeedback.manger043@simplelogin.com">githubfeedback.manger043@simplelogin.com</a>')
@@ -890,9 +891,10 @@ class AudioRouterGUI(QMainWindow):
     def update_devices(self, devices: List[Dict]):
         """Update devices table and default-sink combo"""
         self.devices = devices
-        
         self.devices_table.setRowCount(len(devices))
         self._refresh_default_sink_combo()
+        # Refresh rules table so Target Device column shows friendly names now that we have devices
+        self.update_rules_table()
         
         for i, device in enumerate(devices):
             # Status indicator
@@ -1029,7 +1031,8 @@ class AudioRouterGUI(QMainWindow):
     def update_rules_table(self):
         """Update rules table with current rules"""
         self.rules_table.setRowCount(len(self.rules))
-        
+        if getattr(self, 'about_rules_count_label', None):
+            self.about_rules_count_label.setText(f"<b>Routing rules</b>: {len(self.rules)}")
         for i, rule in enumerate(self.rules):
             # Rule name
             self.rules_table.setItem(i, 0, QTableWidgetItem(rule.get('name', 'Unnamed')))

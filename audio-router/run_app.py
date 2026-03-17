@@ -4,7 +4,7 @@ Standalone launcher for SinkSwitch.
 - As script:  python3 run_app.py  (from audio-router directory)
 - As binary:  ./sinkswitch  (after building with build.sh)
 
-Config on first run: ~/.config/pipewire-router/ (or AUDIO_ROUTER_CONFIG).
+Config on first run: ~/.config/sinkswitch/ (or AUDIO_ROUTER_CONFIG).
 """
 import os
 import sys
@@ -26,7 +26,7 @@ _CONFIG_DIR = os.environ.get("AUDIO_ROUTER_CONFIG")
 if _CONFIG_DIR:
     _CONFIG_DIR = Path(_CONFIG_DIR)
 else:
-    _CONFIG_DIR = Path.home() / ".config" / "pipewire-router"
+    _CONFIG_DIR = Path.home() / ".config" / "sinkswitch"
 os.environ["AUDIO_ROUTER_CONFIG"] = str(_CONFIG_DIR)
 os.environ["AUDIO_ROUTER_LAUNCH_CMD"] = _LAUNCH_CMD
 os.environ["AUDIO_ROUTER_WORKING_DIR"] = str(_APP_DIR)

@@ -24,7 +24,7 @@ python3 run_app.py
 
 ## Config and rules
 
-- **Config dir**: `~/.config/pipewire-router/` (or `AUDIO_ROUTER_CONFIG`)
+- **Config dir**: `~/.config/sinkswitch/` (or `AUDIO_ROUTER_CONFIG`)
 - **Rules file**: `config/routing_rules.yaml`
 
 Example:
