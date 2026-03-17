@@ -9,6 +9,7 @@ Run: python3 run_app.py   (from the audio-router directory)
 
 import sys
 import os
+import fcntl
 import json
 import logging
 import shutil
@@ -24,11 +25,33 @@ from typing import Dict, List, Optional, Any, Tuple
 GITHUB_RELEASES_API = "https://api.github.com/repos/crashman79/sinkswitch/releases/latest"
 UPDATES_CACHE_DIR = Path.home() / ".cache" / "sinkswitch"
 UPDATES_NEW_BINARY = UPDATES_CACHE_DIR / "sinkswitch.new"
+_SINGLE_INSTANCE_LOCK_FILE = None  # hold open for process lifetime
 
 # Bump when tagging a release
-__version__ = "0.7.2"
+__version__ = "0.7.3"
 
 # Config base: set by run_app.py or default
+def _acquire_single_instance_lock() -> bool:
+    """Acquire an exclusive lock so only one instance runs. Returns True if we got the lock."""
+    global _SINGLE_INSTANCE_LOCK_FILE
+    if "--replace-and-run" in sys.argv:
+        return True
+    lock_path = UPDATES_CACHE_DIR / ".lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _SINGLE_INSTANCE_LOCK_FILE = open(lock_path, "w")
+        fcntl.flock(_SINGLE_INSTANCE_LOCK_FILE.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except (BlockingIOError, OSError):
+        if _SINGLE_INSTANCE_LOCK_FILE is not None:
+            try:
+                _SINGLE_INSTANCE_LOCK_FILE.close()
+            except Exception:
+                pass
+            _SINGLE_INSTANCE_LOCK_FILE = None
+        return False
+
+
 def _config_base() -> Path:
     p = os.environ.get("AUDIO_ROUTER_CONFIG")
     return Path(p) if p else Path.home() / ".config" / "sinkswitch"
@@ -1474,6 +1497,14 @@ def main():
     app.setApplicationName("SinkSwitch")
     # Don't quit when window is closed; we hide to tray or quit explicitly
     app.setQuitOnLastWindowClosed(False)
+    
+    if not _acquire_single_instance_lock():
+        QMessageBox.warning(
+            None,
+            "SinkSwitch",
+            "Another instance of SinkSwitch is already running.\nUse the system tray icon or application menu to open it.",
+        )
+        sys.exit(1)
     
     window = AudioRouterGUI()
     if '--minimized' in sys.argv:
