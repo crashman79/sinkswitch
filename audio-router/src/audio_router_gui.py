@@ -28,7 +28,7 @@ UPDATES_NEW_BINARY = UPDATES_CACHE_DIR / "sinkswitch.new"
 _SINGLE_INSTANCE_LOCK_FILE = None  # hold open for process lifetime
 
 # Bump when tagging a release
-__version__ = "0.7.7"
+__version__ = "0.7.8"
 
 # Config base: set by run_app.py or default
 def _acquire_single_instance_lock() -> bool:
