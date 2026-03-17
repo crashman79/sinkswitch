@@ -14,12 +14,19 @@ import logging
 import shutil
 import subprocess
 import threading
+import urllib.error
+import urllib.request
 import yaml
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
+
+# GitHub repo for update check (same as Releases link in README)
+GITHUB_RELEASES_API = "https://api.github.com/repos/crashman79/sinkswitch/releases/latest"
+UPDATES_CACHE_DIR = Path.home() / ".cache" / "sinkswitch"
+UPDATES_NEW_BINARY = UPDATES_CACHE_DIR / "sinkswitch.new"
 
 # Bump when tagging a release
-__version__ = "0.7.1"
+__version__ = "0.7.2"
 
 # Config base: set by run_app.py or default
 def _config_base() -> Path:
@@ -220,6 +227,22 @@ class MonitorThread(QThread):
         self.stop_event.set()
 
 
+class UpdateCheckThread(QThread):
+    """Background thread for update check or download."""
+    result = pyqtSignal(object)  # (ok, message, tag, url) for check; (ok, message) for download
+
+    def __init__(self, mode: str, download_url: Optional[str] = None):
+        super().__init__()
+        self.mode = mode  # "check" or "download"
+        self.download_url = download_url
+
+    def run(self):
+        if self.mode == "check":
+            self.result.emit(_update_check())
+        elif self.mode == "download" and self.download_url:
+            self.result.emit(_update_download(self.download_url))
+
+
 class RuleEditorDialog(QDialog):
     """Dialog for creating/editing routing rules"""
     
@@ -375,6 +398,78 @@ def _install_binary_to_local_bin() -> tuple:
     except Exception as e:
         logger.exception("Install to ~/.local/bin failed")
         return False, str(e)
+
+
+def _version_tuple(version_str: str) -> Tuple[int, ...]:
+    """Parse '0.7.1' or 'v0.7.1' to (0, 7, 1) for comparison."""
+    s = version_str.strip().lstrip("v")
+    parts = []
+    for x in s.split("."):
+        try:
+            parts.append(int(x))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts) if parts else (0,)
+
+
+def _update_check() -> Tuple[bool, str, Optional[str], Optional[str]]:
+    """Check for updates. Returns (ok, message, latest_tag, download_url). Only for frozen builds."""
+    if not _get_installable_binary_path():
+        return False, "Update check is only available when running the built binary.", None, None
+    try:
+        req = urllib.request.Request(GITHUB_RELEASES_API, headers={"Accept": "application/vnd.github.v3+json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode())
+        tag = data.get("tag_name", "").strip()
+        if not tag:
+            return False, "No release tag found.", None, None
+        latest = _version_tuple(tag)
+        current = _version_tuple(__version__)
+        if latest <= current:
+            return True, f"You have the latest version ({__version__}).", tag, None
+        asset_name = "sinkswitch"
+        url = None
+        for a in data.get("assets", []):
+            if a.get("name") == asset_name:
+                url = a.get("browser_download_url")
+                break
+        if not url:
+            return False, f"New version {tag} exists but no '{asset_name}' asset found.", tag, None
+        return True, f"Update available: {tag}", tag, url
+    except urllib.error.HTTPError as e:
+        return False, f"Update check failed: HTTP {e.code}", None, None
+    except Exception as e:
+        logger.debug("Update check failed: %s", e)
+        return False, f"Update check failed: {e}", None, None
+
+
+def _update_download(download_url: str) -> Tuple[bool, str]:
+    """Download update to UPDATES_NEW_BINARY. Returns (success, message)."""
+    try:
+        UPDATES_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        req = urllib.request.Request(download_url, headers={"Accept": "application/octet-stream"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            with open(UPDATES_NEW_BINARY, "wb") as f:
+                f.write(r.read())
+        UPDATES_NEW_BINARY.chmod(0o755)
+        return True, "Update downloaded. Click 'Restart to apply' to use the new version."
+    except Exception as e:
+        logger.exception("Update download failed")
+        return False, str(e)
+
+
+def _update_restart_to_apply() -> Tuple[bool, str]:
+    """Exec the .new binary with --replace-and-run and exit. Returns (True, '') if we're about to exit; (False, error) otherwise."""
+    if not UPDATES_NEW_BINARY.exists():
+        return False, "No downloaded update found."
+    current = _get_installable_binary_path()
+    if not current:
+        return False, "Restart is only available when running the built binary."
+    try:
+        os.execv(str(UPDATES_NEW_BINARY), [str(UPDATES_NEW_BINARY), "--replace-and-run", str(current)])
+    except Exception as e:
+        return False, str(e)
+    return True, ""
 
 
 def _create_app_menu_shortcut() -> Optional[Path]:
@@ -558,6 +653,11 @@ class AudioRouterGUI(QMainWindow):
     def _on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger or reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self._show_from_tray()
+
+    def _show_tray_attention(self, message: str, title: str = "SinkSwitch"):
+        """Show a brief tray balloon to draw attention when app is in tray."""
+        if self.tray_icon and self.tray_icon.isVisible():
+            self.tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 2500)
 
     def _show_from_tray(self):
         self.show()
@@ -787,9 +887,10 @@ class AudioRouterGUI(QMainWindow):
     def create_settings_tab(self) -> QWidget:
         """Create the Settings tab (start on login, auto-start routing)."""
         widget = QWidget()
-        layout = QVBoxLayout()
-        widget.setLayout(layout)
+        main_layout = QHBoxLayout()
+        widget.setLayout(main_layout)
 
+        left_col = QVBoxLayout()
         login_group = QGroupBox("Start on login (Linux desktop)")
         login_layout = QVBoxLayout()
         self.login_none_radio = QRadioButton("None – start manually")
@@ -803,33 +904,37 @@ class AudioRouterGUI(QMainWindow):
         self.start_minimized_check.setToolTip("When enabled, the window stays hidden (tray only) or minimized when the app is started at login.")
         login_layout.addWidget(self.start_minimized_check)
         login_group.setLayout(login_layout)
-        layout.addWidget(login_group)
+        left_col.addWidget(login_group)
 
         self.start_routing_check = QCheckBox("Start routing automatically when app opens")
         self.start_routing_check.setChecked(self.start_routing_on_launch)
-        layout.addWidget(self.start_routing_check)
+        left_col.addWidget(self.start_routing_check)
 
         self.close_to_tray_check = QCheckBox("Close to tray (minimize to system tray instead of quitting)")
         self.close_to_tray_check.setChecked(self.close_to_tray)
         self.close_to_tray_check.setToolTip("When enabled, closing the window hides the app to the tray; use tray menu to Show or Quit.")
-        layout.addWidget(self.close_to_tray_check)
+        left_col.addWidget(self.close_to_tray_check)
+        left_col.addStretch()
+        main_layout.addLayout(left_col)
 
+        right_col = QVBoxLayout()
         install_group = QGroupBox("Install binary to a standard location")
         install_layout = QVBoxLayout()
-        install_layout.addWidget(QLabel("Copy the app binary to ~/.local/bin so you can run 'sinkswitch' from anywhere (if that directory is on your PATH)."))
+        install_layout.addWidget(QLabel("Copy the app binary to ~/.local/bin so you can run 'sinkswitch' from anywhere (if that directory is on your PATH). Overwrites existing file if present."))
         self.install_bin_btn = QPushButton("Copy to ~/.local/bin")
-        self.install_bin_btn.setToolTip("Only available when running the built binary (e.g. ./dist/sinkswitch).")
+        self.install_bin_btn.setMaximumWidth(180)
+        self.install_bin_btn.setToolTip("Only available when running the built binary. Overwrites ~/.local/bin/sinkswitch if it already exists.")
         self.install_bin_btn.clicked.connect(self._on_install_to_local_bin)
         if not _get_installable_binary_path():
             self.install_bin_btn.setEnabled(False)
         install_layout.addWidget(self.install_bin_btn)
         install_group.setLayout(install_layout)
-        layout.addWidget(install_group)
+        right_col.addWidget(install_group)
 
         btn_row = QHBoxLayout()
         shortcut_btn = QPushButton("Add to application menu")
-        shortcut_btn.setToolTip("Adds a launcher to your application menu (e.g. GNOME/KDE app grid) so you can start the app without a terminal.")
         shortcut_btn.setMaximumWidth(220)
+        shortcut_btn.setToolTip("Adds or updates a launcher in your application menu. Overwrites the existing launcher if present.")
         shortcut_btn.clicked.connect(self._on_create_app_menu_shortcut)
         btn_row.addWidget(shortcut_btn)
         apply_btn = QPushButton("Apply and save")
@@ -837,8 +942,9 @@ class AudioRouterGUI(QMainWindow):
         apply_btn.clicked.connect(self.apply_settings)
         btn_row.addWidget(apply_btn)
         btn_row.addStretch()
-        layout.addLayout(btn_row)
-        layout.addStretch()
+        right_col.addLayout(btn_row)
+        right_col.addStretch()
+        main_layout.addLayout(right_col)
         return widget
 
     def create_about_tab(self) -> QWidget:
@@ -869,6 +975,31 @@ class AudioRouterGUI(QMainWindow):
         layout.addSpacing(8)
         self.about_rules_count_label = QLabel(f"<b>Routing rules</b>: {len(self.rules)}")
         layout.addWidget(self.about_rules_count_label)
+        layout.addSpacing(12)
+        layout.addWidget(QLabel("<b>Updates</b>"))
+        update_row = QHBoxLayout()
+        self.update_check_btn = QPushButton("Check for updates")
+        self.update_check_btn.clicked.connect(self._on_check_for_updates)
+        self.update_status_label = QLabel("")
+        self.update_status_label.setWordWrap(True)
+        self.update_download_btn = QPushButton("Download update")
+        self.update_download_btn.clicked.connect(self._on_download_update)
+        self.update_download_btn.hide()
+        self.update_restart_btn = QPushButton("Restart to apply update")
+        self.update_restart_btn.clicked.connect(self._on_restart_to_apply)
+        self.update_restart_btn.hide()
+        update_row.addWidget(self.update_check_btn)
+        update_row.addWidget(self.update_status_label)
+        update_row.addStretch()
+        layout.addLayout(update_row)
+        update_btn_row = QHBoxLayout()
+        update_btn_row.addWidget(self.update_download_btn)
+        update_btn_row.addWidget(self.update_restart_btn)
+        update_btn_row.addStretch()
+        layout.addLayout(update_btn_row)
+        self._update_download_url = None
+        self._update_check_thread = None
+        self._update_download_thread = None
         layout.addSpacing(8)
         layout.addWidget(QLabel("<b>Feedback</b>"))
         feedback_label = QLabel('<a href="mailto:githubfeedback.manger043@simplelogin.com">githubfeedback.manger043@simplelogin.com</a>')
@@ -876,6 +1007,53 @@ class AudioRouterGUI(QMainWindow):
         layout.addWidget(feedback_label)
         layout.addStretch()
         return widget
+
+    def _on_check_for_updates(self):
+        self.update_check_btn.setEnabled(False)
+        self.update_status_label.setText("Checking...")
+        self.update_download_btn.hide()
+        self.update_restart_btn.hide()
+        self._update_download_url = None
+        self._update_check_thread = UpdateCheckThread("check")
+        self._update_check_thread.result.connect(self._on_update_check_result)
+        self._update_check_thread.finished.connect(lambda: self.update_check_btn.setEnabled(True))
+        self._update_check_thread.start()
+
+    def _on_update_check_result(self, result):
+        ok, message, tag, url = result
+        self.update_status_label.setText(message)
+        if ok and url:
+            self._update_download_url = url
+            self.update_download_btn.show()
+        else:
+            self._update_download_url = None
+            self.update_download_btn.hide()
+        self.update_restart_btn.hide()
+
+    def _on_download_update(self):
+        if not self._update_download_url:
+            return
+        self.update_download_btn.setEnabled(False)
+        self.update_status_label.setText("Downloading...")
+        self._update_download_thread = UpdateCheckThread("download", self._update_download_url)
+        self._update_download_thread.result.connect(self._on_update_download_result)
+        self._update_download_thread.finished.connect(lambda: self.update_download_btn.setEnabled(True))
+        self._update_download_thread.start()
+
+    def _on_update_download_result(self, result):
+        ok, message = result
+        self.update_status_label.setText(message)
+        if ok:
+            self.update_download_btn.hide()
+            self.update_restart_btn.show()
+        else:
+            QMessageBox.warning(self, "Download failed", message)
+
+    def _on_restart_to_apply(self):
+        ok, err = _update_restart_to_apply()
+        if not ok:
+            QMessageBox.warning(self, "Restart failed", err)
+        # else: we exec and exit
 
     def _on_install_to_local_bin(self):
         ok, msg = _install_binary_to_local_bin()
@@ -1279,6 +1457,7 @@ class AudioRouterGUI(QMainWindow):
         """Close or hide to tray depending on preference."""
         if self.close_to_tray and self.tray_icon and self.tray_icon.isVisible():
             self.hide()
+            self._show_tray_attention("Running in the system tray. Click the icon to open.")
             event.accept()
             return
         self._cleanup()
@@ -1300,6 +1479,7 @@ def main():
     if '--minimized' in sys.argv:
         if window.tray_icon and window.tray_icon.isVisible():
             window.hide()
+            window._show_tray_attention("Running in the system tray. Click the icon to open.")
         else:
             window.showMinimized()
     else:

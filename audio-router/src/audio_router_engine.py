@@ -92,10 +92,15 @@ class AudioRouterEngine:
                     break
             
             if not device_connected:
+                target_label = target_device
+                for d in self.device_monitor.get_devices():
+                    if d.get('id') == target_device:
+                        target_label = d.get('friendly_name') or d.get('name') or target_device
+                        break
                 return {
                     'rule_name': rule_name,
                     'success': False,
-                    'message': f"Target device not connected: {target_device}"
+                    'message': f"Target device not connected: {target_label}"
                 }
             
             # For Bluetooth devices, prefer A2DP profile
@@ -112,12 +117,16 @@ class AudioRouterEngine:
                 keywords,
                 all_targets
             )
-            
+            target_label = connected_target
+            for d in self.device_monitor.get_devices():
+                if d.get('id') == connected_target:
+                    target_label = d.get('friendly_name') or d.get('name') or connected_target
+                    break
             return {
                 'rule_name': rule_name,
                 'success': True,
                 'routed_count': routed,
-                'message': f"Successfully routed {routed} stream(s) to {connected_target}",
+                'message': f"Successfully routed {routed} stream(s) to {target_label}",
             }
         
         except Exception as e:
@@ -355,7 +364,7 @@ class AudioRouterEngine:
             
             logger.debug(f"Looking for app '{app_name}', target sink: {target_sink}")
             
-            # Get sink input index for the application
+            # Get sink input index and current sink for the application (single pass)
             result = subprocess.run(
                 ['pactl', 'list', 'sink-inputs'],
                 capture_output=True,
@@ -365,34 +374,43 @@ class AudioRouterEngine:
             
             sink_input_id = None
             current_sink_input = None
+            current_sink_num = None
             
             for line in result.stdout.split('\n'):
-                if 'Sink Input #' in line:
-                    current_sink_input = line.split('#')[1].strip()
-                elif 'application.name' in line:
-                    if app_name in line:
-                        # Found matching application
-                        sink_input_id = current_sink_input
-                        break
+                line_stripped = line.strip()
+                if line_stripped.startswith('Sink Input #'):
+                    current_sink_input = line_stripped.split('#')[1].strip()
+                    current_sink_num = None
+                elif current_sink_input and line_stripped.startswith('Sink:'):
+                    # Current sink this input is connected to (skip "Sink Input" lines)
+                    parts = line_stripped.split(':', 1)
+                    if len(parts) > 1:
+                        current_sink_num = parts[1].strip().split()[0] if parts[1].strip() else None
+                elif current_sink_input and 'application.name' in line and app_name in line:
+                    sink_input_id = current_sink_input
+                    break
             
-            if sink_input_id:
-                # Move sink input to target sink (by number, not device name)
-                result = subprocess.run(
-                    ['pactl', 'move-sink-input', sink_input_id, target_sink],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                    check=False
-                )
-                if result.returncode == 0:
-                    logger.debug(f"Moved sink input {sink_input_id} ({app_name}) to sink #{target_sink}")
-                    return True
-                else:
-                    logger.debug(f"Failed to move sink input {sink_input_id}: {result.stderr}")
-                    return False
-            
-            logger.debug(f"Could not find sink input for {app_name}")
-            return False
+            if not sink_input_id:
+                logger.debug(f"Could not find sink input for {app_name}")
+                return False
+            # Only move if stream is not already on target (avoids no-op moves and duplicate notifications on seek/rewind)
+            if current_sink_num is not None and current_sink_num == target_sink:
+                logger.debug(f"Sink input {sink_input_id} ({app_name}) already on target sink #{target_sink}, skipping move")
+                return False
+            # Move sink input to target sink (by number, not device name)
+            result = subprocess.run(
+                ['pactl', 'move-sink-input', sink_input_id, target_sink],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False
+            )
+            if result.returncode == 0:
+                logger.debug(f"Moved sink input {sink_input_id} ({app_name}) to sink #{target_sink}")
+                return True
+            else:
+                logger.debug(f"Failed to move sink input {sink_input_id}: {result.stderr}")
+                return False
         except Exception as e:
             logger.debug(f"PulseAudio routing failed: {e}")
             return False

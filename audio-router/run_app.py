@@ -14,6 +14,24 @@ _FROZEN = getattr(sys, "frozen", False)
 if _FROZEN:
     _APP_DIR = Path(sys.executable).resolve().parent
     _LAUNCH_CMD = str(Path(sys.executable).resolve())
+    # Handle update replace-and-restart: we are the new binary run from cache; overwrite target and re-exec
+    _argv = list(sys.argv)
+    if "--replace-and-run" in _argv:
+        idx = _argv.index("--replace-and-run")
+        if idx + 1 < len(_argv):
+            _target = Path(_argv[idx + 1]).resolve()
+            _self = Path(sys.executable).resolve()
+            try:
+                with open(_self, "rb") as f:
+                    _data = f.read()
+                with open(_target, "wb") as f:
+                    f.write(_data)
+                _target.chmod(0o755)
+                _new_argv = [str(_target)] + [a for i, a in enumerate(_argv) if i != idx and i != idx + 1]
+                os.execv(str(_target), _new_argv)
+            except Exception:
+                pass
+        sys.exit(0)
 else:
     _APP_DIR = Path(__file__).resolve().parent
     _SRC_DIR = _APP_DIR / "src"
@@ -52,6 +70,13 @@ def _bootstrap_config():
 
 def main():
     _bootstrap_config()
+    if _FROZEN:
+        _cache_new = Path.home() / ".cache" / "sinkswitch" / "sinkswitch.new"
+        if _cache_new.exists() and "--replace-and-run" not in sys.argv:
+            try:
+                _cache_new.unlink()
+            except Exception:
+                pass
     # Import after path and env are set
     from audio_router_gui import main as gui_main
     gui_main()
