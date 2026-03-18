@@ -16,6 +16,16 @@ python3 run_app.py
 ./dist/sinkswitch
 ```
 
+## Releasing a new version (so in-app version updates)
+
+Version is taken from the **git tag** at build time. No manual edit needed.
+
+1. Tag the release: `git tag v0.7.11` (or the version you want).
+2. Run `./build.sh` — it writes `src/_version.py` from the tag and builds `dist/sinkswitch`.
+3. Push the tag, create the GitHub release, and upload `dist/sinkswitch`.
+
+The binary will report that version; the update checker uses the same tag from the API.
+
 ## Default behavior (out of the box)
 
 - **First run** — If no config exists, the app auto-generates initial routing rules from connected devices (browsers, meetings, media, etc. → Bluetooth/USB headset when available). Edit or remove them in the Routing Rules tab.
