@@ -96,7 +96,7 @@ try:
         QHeaderView, QMessageBox, QFileDialog, QComboBox, QLineEdit,
         QDialog, QDialogButtonBox, QCheckBox, QScrollArea, QRadioButton, QButtonGroup
     )
-    from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QAction
+    from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QAction, QPalette
     from PyQt6.QtCore import QTimer, Qt, QSize, pyqtSignal, QThread
     from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
 except ImportError as e:
@@ -395,6 +395,39 @@ def _save_app_settings(data: Dict[str, Any]) -> None:
         json.dump(data, f, indent=2)
 
 
+def _apply_theme(app: "QApplication", theme: str) -> None:
+    """Apply light, dark, or system theme. theme is 'light' | 'dark' | 'system'."""
+    if theme == "system":
+        app.setPalette(app.style().standardPalette())
+        return
+    palette = QPalette()
+    if theme == "dark":
+        palette.setColor(QPalette.Window, QColor(53, 53, 53))
+        palette.setColor(QPalette.WindowText, Qt.GlobalColor.white)
+        palette.setColor(QPalette.Base, QColor(35, 35, 35))
+        palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
+        palette.setColor(QPalette.Text, Qt.GlobalColor.white)
+        palette.setColor(QPalette.Button, QColor(53, 53, 53))
+        palette.setColor(QPalette.ButtonText, Qt.GlobalColor.white)
+        palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
+        palette.setColor(QPalette.HighlightedText, Qt.GlobalColor.black)
+        palette.setColor(QPalette.Link, QColor(42, 130, 218))
+        palette.setColor(QPalette.PlaceholderText, QColor(127, 127, 127))
+    else:  # light
+        palette.setColor(QPalette.Window, Qt.GlobalColor.white)
+        palette.setColor(QPalette.WindowText, Qt.GlobalColor.black)
+        palette.setColor(QPalette.Base, QColor(255, 255, 255))
+        palette.setColor(QPalette.AlternateBase, QColor(240, 240, 240))
+        palette.setColor(QPalette.Text, Qt.GlobalColor.black)
+        palette.setColor(QPalette.Button, QColor(240, 240, 240))
+        palette.setColor(QPalette.ButtonText, Qt.GlobalColor.black)
+        palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
+        palette.setColor(QPalette.HighlightedText, Qt.GlobalColor.white)
+        palette.setColor(QPalette.Link, QColor(0, 0, 255))
+        palette.setColor(QPalette.PlaceholderText, QColor(127, 127, 127))
+    app.setPalette(palette)
+
+
 def _applications_dir() -> Path:
     """User application menu directory (~/.local/share/applications)."""
     return Path.home() / ".local" / "share" / "applications"
@@ -642,6 +675,7 @@ class AudioRouterGUI(QMainWindow):
         self.close_to_tray = settings.get('close_to_tray', False)
         self.start_minimized = settings.get('start_minimized', False)
         self.offer_install_to_bin = settings.get('offer_install_to_bin', True)
+        self.theme_setting = settings.get('theme', 'system')
         self.monitor_thread: Optional[MonitorThread] = None
         self.device_thread = None
         self.stream_thread = None
@@ -995,6 +1029,18 @@ class AudioRouterGUI(QMainWindow):
         self.start_routing_check.setChecked(self.start_routing_on_launch)
         left_col.addWidget(self.start_routing_check)
 
+        theme_group = QGroupBox("Appearance")
+        theme_layout = QVBoxLayout()
+        theme_layout.addWidget(QLabel("Theme:"))
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["System (follow desktop)", "Light", "Dark"])
+        idx = {"system": 0, "light": 1, "dark": 2}.get(self.theme_setting, 0)
+        self.theme_combo.setCurrentIndex(idx)
+        self.theme_combo.setToolTip("System follows your desktop theme. After an update restart, the saved choice is applied so the app does not revert to light.")
+        theme_layout.addWidget(self.theme_combo)
+        theme_group.setLayout(theme_layout)
+        left_col.addWidget(theme_group)
+
         self.close_to_tray_check = QCheckBox("Close to tray (minimize to system tray instead of quitting)")
         self.close_to_tray_check.setChecked(self.close_to_tray)
         self.close_to_tray_check.setToolTip("When enabled, closing the window hides the app to the tray; use tray menu to Show or Quit.")
@@ -1170,17 +1216,22 @@ class AudioRouterGUI(QMainWindow):
         start_routing = self.start_routing_check.isChecked()
         close_to_tray = self.close_to_tray_check.isChecked()
         start_minimized = self.start_minimized_check.isChecked()
+        theme_map = {0: "system", 1: "light", 2: "dark"}
+        theme = theme_map.get(self.theme_combo.currentIndex(), "system")
         self.start_on_login = start_on_login
         self.start_routing_on_launch = start_routing
         self.close_to_tray = close_to_tray
         self.start_minimized = start_minimized
+        self.theme_setting = theme
         _save_app_settings({
             'start_on_login': start_on_login,
             'start_routing_on_launch': start_routing,
             'close_to_tray': close_to_tray,
             'start_minimized': start_minimized,
+            'theme': theme,
             'offer_install_to_bin': getattr(self, 'offer_install_to_bin', True),
         })
+        _apply_theme(QApplication.instance(), theme)
         exec_cmd = _get_launch_cmd_for_desktop()
         if start_on_login == 'xdg':
             _set_autostart_enabled(True, exec_cmd, start_minimized=start_minimized)
@@ -1559,7 +1610,10 @@ def main():
     app.setApplicationName("SinkSwitch")
     # Don't quit when window is closed; we hide to tray or quit explicitly
     app.setQuitOnLastWindowClosed(False)
-    
+    # Apply saved theme so restart-after-update uses user choice (env whitelist may drop DE theme vars)
+    theme = _load_app_settings().get("theme", "system")
+    _apply_theme(app, theme if theme in ("light", "dark", "system") else "system")
+
     if not _acquire_single_instance_lock():
         QMessageBox.warning(
             None,
