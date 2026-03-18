@@ -28,8 +28,10 @@ UPDATES_CACHE_DIR = Path.home() / ".cache" / "sinkswitch"
 UPDATES_NEW_BINARY = UPDATES_CACHE_DIR / "sinkswitch.new"
 _SINGLE_INSTANCE_LOCK_FILE = None  # hold open for process lifetime
 
-# Bump when tagging a release
-__version__ = "0.7.10"
+try:
+    from _version import __version__
+except ImportError:
+    __version__ = "0.0.0-dev"  # running from source without build
 
 # Config base: set by run_app.py or default
 def _acquire_single_instance_lock() -> bool:
