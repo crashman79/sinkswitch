@@ -564,14 +564,13 @@ def _create_app_menu_shortcut() -> Optional[Path]:
     app_dir.mkdir(parents=True, exist_ok=True)
     path = app_dir / "sinkswitch.desktop"
     exec_cmd = _get_launch_cmd_for_desktop()
-    work_dir = os.environ.get("AUDIO_ROUTER_WORKING_DIR", str(Path.home()))
-    path_line = f"Path={work_dir}\n" if work_dir else ""
+    # Omit Path= so the launcher does not set CWD to a dev folder (config is in ~/.config/sinkswitch).
     content = f"""[Desktop Entry]
 Type=Application
 Name=SinkSwitch
 Comment=Automatic audio routing for PipeWire/PulseAudio
 Exec={exec_cmd}
-{path_line}Icon=audio-card
+Icon=audio-card
 Terminal=false
 Categories=AudioVideo;Audio;Settings;
 Keywords=audio;routing;pipewire;pulseaudio;

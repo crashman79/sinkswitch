@@ -13,6 +13,8 @@ ENV/
 .venv-build/
 build/
 dist/
+audio-router/build/
+audio-router/dist/
 audio-router/src/_version.py
 
 # IDE
