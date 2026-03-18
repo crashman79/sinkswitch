@@ -397,35 +397,40 @@ def _save_app_settings(data: Dict[str, Any]) -> None:
 
 def _apply_theme(app: "QApplication", theme: str) -> None:
     """Apply light, dark, or system theme. theme is 'light' | 'dark' | 'system'."""
-    if theme == "system":
-        app.setPalette(app.style().standardPalette())
-        return
-    palette = QPalette()
-    if theme == "dark":
-        palette.setColor(QPalette.Window, QColor(53, 53, 53))
-        palette.setColor(QPalette.WindowText, Qt.GlobalColor.white)
-        palette.setColor(QPalette.Base, QColor(35, 35, 35))
-        palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
-        palette.setColor(QPalette.Text, Qt.GlobalColor.white)
-        palette.setColor(QPalette.Button, QColor(53, 53, 53))
-        palette.setColor(QPalette.ButtonText, Qt.GlobalColor.white)
-        palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
-        palette.setColor(QPalette.HighlightedText, Qt.GlobalColor.black)
-        palette.setColor(QPalette.Link, QColor(42, 130, 218))
-        palette.setColor(QPalette.PlaceholderText, QColor(127, 127, 127))
-    else:  # light
-        palette.setColor(QPalette.Window, Qt.GlobalColor.white)
-        palette.setColor(QPalette.WindowText, Qt.GlobalColor.black)
-        palette.setColor(QPalette.Base, QColor(255, 255, 255))
-        palette.setColor(QPalette.AlternateBase, QColor(240, 240, 240))
-        palette.setColor(QPalette.Text, Qt.GlobalColor.black)
-        palette.setColor(QPalette.Button, QColor(240, 240, 240))
-        palette.setColor(QPalette.ButtonText, Qt.GlobalColor.black)
-        palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
-        palette.setColor(QPalette.HighlightedText, Qt.GlobalColor.white)
-        palette.setColor(QPalette.Link, QColor(0, 0, 255))
-        palette.setColor(QPalette.PlaceholderText, QColor(127, 127, 127))
-    app.setPalette(palette)
+    if theme not in ("light", "dark", "system"):
+        theme = "system"
+    try:
+        if theme == "system":
+            app.setPalette(app.style().standardPalette())
+            return
+        palette = QPalette()
+        if theme == "dark":
+            palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
+            palette.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
+            palette.setColor(QPalette.ColorRole.Base, QColor(35, 35, 35))
+            palette.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
+            palette.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
+            palette.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
+            palette.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
+            palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
+            palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
+            palette.setColor(QPalette.ColorRole.Link, QColor(42, 130, 218))
+            palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(127, 127, 127))
+        else:  # light
+            palette.setColor(QPalette.ColorRole.Window, Qt.GlobalColor.white)
+            palette.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.black)
+            palette.setColor(QPalette.ColorRole.Base, QColor(255, 255, 255))
+            palette.setColor(QPalette.ColorRole.AlternateBase, QColor(240, 240, 240))
+            palette.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.black)
+            palette.setColor(QPalette.ColorRole.Button, QColor(240, 240, 240))
+            palette.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.black)
+            palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
+            palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.white)
+            palette.setColor(QPalette.ColorRole.Link, QColor(0, 0, 255))
+            palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(127, 127, 127))
+        app.setPalette(palette)
+    except Exception as e:
+        logger.warning("Failed to apply theme %s: %s", theme, e)
 
 
 def _applications_dir() -> Path:
@@ -547,6 +552,7 @@ def _update_restart_env_whitelist() -> Dict[str, str]:
         "TMPDIR", "TEMP", "TMP",
         "QT_QPA_PLATFORM_THEME", "QT_QPA_PLATFORM", "QT_STYLE_OVERRIDE",
         "GTK_THEME", "GDK_BACKEND", "COLORSCHEME",
+        "AUDIO_ROUTER_CONFIG",
     }
     return {k: v for k, v in os.environ.items() if k in allow and v is not None}
 
@@ -1224,6 +1230,7 @@ class AudioRouterGUI(QMainWindow):
         self.start_minimized = start_minimized
         self.theme_setting = theme
         _save_app_settings({
+            **_load_app_settings(),
             'start_on_login': start_on_login,
             'start_routing_on_launch': start_routing,
             'close_to_tray': close_to_tray,
@@ -1231,7 +1238,10 @@ class AudioRouterGUI(QMainWindow):
             'theme': theme,
             'offer_install_to_bin': getattr(self, 'offer_install_to_bin', True),
         })
-        _apply_theme(QApplication.instance(), theme)
+        # Defer palette apply to next event loop to avoid re-entrancy crash in Qt
+        app = QApplication.instance()
+        if app:
+            QTimer.singleShot(0, lambda: _apply_theme(app, theme))
         exec_cmd = _get_launch_cmd_for_desktop()
         if start_on_login == 'xdg':
             _set_autostart_enabled(True, exec_cmd, start_minimized=start_minimized)
@@ -1611,8 +1621,11 @@ def main():
     # Don't quit when window is closed; we hide to tray or quit explicitly
     app.setQuitOnLastWindowClosed(False)
     # Apply saved theme so restart-after-update uses user choice (env whitelist may drop DE theme vars)
-    theme = _load_app_settings().get("theme", "system")
-    _apply_theme(app, theme if theme in ("light", "dark", "system") else "system")
+    try:
+        theme = _load_app_settings().get("theme", "system")
+        _apply_theme(app, theme)
+    except Exception as e:
+        logger.warning("Could not apply saved theme: %s", e)
 
     if not _acquire_single_instance_lock():
         QMessageBox.warning(
