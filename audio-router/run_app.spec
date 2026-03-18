@@ -6,6 +6,14 @@ from pathlib import Path
 app_dir = Path(SPEC).resolve().parent
 src_dir = app_dir / 'src'
 
+# Ensure certifi's CA bundle is in the bundle (SSL verify in frozen app)
+_certifi_datas = []
+try:
+    import certifi
+    _certifi_datas = [(certifi.where(), 'certifi')]
+except Exception:
+    pass
+
 a = Analysis(
     [str(app_dir / 'run_app.py')],
     pathex=[str(src_dir)],
@@ -16,7 +24,9 @@ a = Analysis(
         'audio_router_engine',
         'intelligent_audio_router',
         'yaml',
+        'certifi',
     ],
+    datas=_certifi_datas,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

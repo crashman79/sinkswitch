@@ -15,6 +15,7 @@ import logging
 import shutil
 import subprocess
 import threading
+import ssl
 import urllib.error
 import urllib.request
 import yaml
@@ -435,19 +436,29 @@ def _version_tuple(version_str: str) -> Tuple[int, ...]:
     return tuple(parts) if parts else (0,)
 
 
+def _update_ssl_context() -> ssl.SSLContext:
+    """SSL context for update check/download; use certifi bundle when available (fixes frozen app SSL)."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
 def _update_check() -> Tuple[bool, str, Optional[str], Optional[str]]:
     """Check for updates. Returns (ok, message, latest_tag, download_url). Only for frozen builds."""
     if not _get_installable_binary_path():
         return False, "Update check is only available when running the built binary.", None, None
     try:
         req = urllib.request.Request(GITHUB_RELEASES_API, headers={"Accept": "application/vnd.github.v3+json"})
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with urllib.request.urlopen(req, timeout=10, context=_update_ssl_context()) as r:
             data = json.loads(r.read().decode())
         tag = data.get("tag_name", "").strip()
         if not tag:
             return False, "No release tag found.", None, None
         latest = _version_tuple(tag)
-        current = _version_tuple(__version__)
+        current_ver = os.environ.get("SINKSWITCH_FAKE_VERSION", __version__).strip()
+        current = _version_tuple(current_ver)
         if latest <= current:
             return True, f"You have the latest version ({__version__}).", tag, None
         asset_name = "sinkswitch"
@@ -471,7 +482,7 @@ def _update_download(download_url: str) -> Tuple[bool, str]:
     try:
         UPDATES_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         req = urllib.request.Request(download_url, headers={"Accept": "application/octet-stream"})
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with urllib.request.urlopen(req, timeout=60, context=_update_ssl_context()) as r:
             with open(UPDATES_NEW_BINARY, "wb") as f:
                 f.write(r.read())
         UPDATES_NEW_BINARY.chmod(0o755)
@@ -479,6 +490,18 @@ def _update_download(download_url: str) -> Tuple[bool, str]:
     except Exception as e:
         logger.exception("Update download failed")
         return False, str(e)
+
+
+def _update_restart_env_whitelist() -> Dict[str, str]:
+    """Env vars to pass to the updater-helper so the exec'd binary gets a clean env (no _MEIPASS/LD_LIBRARY_PATH from PyInstaller)."""
+    allow = {
+        "HOME", "PATH", "USER", "LOGNAME", "SHELL",
+        "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XDG_SESSION_TYPE",
+        "LANG", "LC_ALL", "LC_CTYPE", "LANGUAGE",
+        "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS",
+        "TMPDIR", "TEMP", "TMP",
+    }
+    return {k: v for k, v in os.environ.items() if k in allow and v is not None}
 
 
 def _update_restart_to_apply() -> Tuple[bool, str]:
@@ -506,10 +529,19 @@ def _update_restart_to_apply() -> Tuple[bool, str]:
         )
         script.close()
         os.chmod(script.name, 0o755)
-        os.execv("/bin/sh", ["/bin/sh", script.name, str(path_new), str(path_current)])
+        clean_env = _update_restart_env_whitelist()
+        os.execve("/bin/sh", ["/bin/sh", script.name, str(path_new), str(path_current)], clean_env)
     except Exception as e:
         return False, str(e)
     return True, ""
+
+
+def _get_launch_cmd_for_desktop() -> str:
+    """Preferred Exec= for desktop/autostart: use ~/.local/bin/sinkswitch if installed there, else current binary."""
+    local_bin = Path.home() / ".local" / "bin" / "sinkswitch"
+    if local_bin.is_file() and os.access(local_bin, os.X_OK):
+        return str(local_bin)
+    return os.environ.get("AUDIO_ROUTER_LAUNCH_CMD", f"{sys.executable} -m run_app")
 
 
 def _create_app_menu_shortcut() -> Optional[Path]:
@@ -517,7 +549,7 @@ def _create_app_menu_shortcut() -> Optional[Path]:
     app_dir = _applications_dir()
     app_dir.mkdir(parents=True, exist_ok=True)
     path = app_dir / "sinkswitch.desktop"
-    exec_cmd = os.environ.get("AUDIO_ROUTER_LAUNCH_CMD", f"{sys.executable} -m run_app")
+    exec_cmd = _get_launch_cmd_for_desktop()
     work_dir = os.environ.get("AUDIO_ROUTER_WORKING_DIR", str(Path.home()))
     path_line = f"Path={work_dir}\n" if work_dir else ""
     content = f"""[Desktop Entry]
@@ -1136,7 +1168,7 @@ class AudioRouterGUI(QMainWindow):
             'start_minimized': start_minimized,
             'offer_install_to_bin': getattr(self, 'offer_install_to_bin', True),
         })
-        exec_cmd = os.environ.get('AUDIO_ROUTER_LAUNCH_CMD', f'{sys.executable} -m run_app')
+        exec_cmd = _get_launch_cmd_for_desktop()
         if start_on_login == 'xdg':
             _set_autostart_enabled(True, exec_cmd, start_minimized=start_minimized)
         else:

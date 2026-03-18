@@ -1,5 +1,6 @@
 PyYAML>=6.0
 dbus-python>=1.2.18
+certifi>=2023.0.0
 
 # Optional dependencies for tray icon
 # These are usually pre-installed on desktop systems
