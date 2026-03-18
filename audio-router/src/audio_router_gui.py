@@ -438,11 +438,20 @@ def _version_tuple(version_str: str) -> Tuple[int, ...]:
 
 def _update_ssl_context() -> ssl.SSLContext:
     """SSL context for update check/download; use certifi bundle when available (fixes frozen app SSL)."""
-    try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        return ssl.create_default_context()
+    cafile = None
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", None)
+        if base:
+            bundled = os.path.join(base, "certifi", "cacert.pem")
+            if os.path.isfile(bundled):
+                cafile = bundled
+    if not cafile:
+        try:
+            import certifi
+            cafile = certifi.where()
+        except ImportError:
+            pass
+    return ssl.create_default_context(cafile=cafile) if cafile else ssl.create_default_context()
 
 
 def _update_check() -> Tuple[bool, str, Optional[str], Optional[str]]:
