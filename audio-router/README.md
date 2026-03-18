@@ -16,15 +16,14 @@ python3 run_app.py
 ./dist/sinkswitch
 ```
 
-## Releasing a new version (so in-app version updates)
+## Releasing a new version
 
-Version is taken from the **git tag** at build time. No manual edit needed.
+Version comes from the **git tag** at build time. The GitHub Action builds the binary and creates the release when you push a tag.
 
-1. Tag the release: `git tag v0.7.11` (or the version you want).
-2. Run `./build.sh` — it writes `src/_version.py` from the tag and builds `dist/sinkswitch`.
-3. Push the tag, create the GitHub release, and upload `dist/sinkswitch`.
+1. Tag and push: `git tag v0.7.11 && git push origin v0.7.11`
+2. The workflow builds the binary with that version and creates the GitHub release with the asset. No manual upload.
 
-The binary will report that version; the update checker uses the same tag from the API.
+For a **local** build (e.g. to test), run `./build.sh` — it sets the version from the current repo tag.
 
 ## Default behavior (out of the box)
 

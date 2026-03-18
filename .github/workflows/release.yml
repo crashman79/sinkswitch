@@ -22,6 +22,11 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libglib2.0-dev pkg-config
 
+      - name: Set version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          printf '__version__ = "%s"\n' "$VERSION" > audio-router/src/_version.py
+
       - name: Build binary
         run: |
           cd audio-router

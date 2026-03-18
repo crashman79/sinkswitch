@@ -504,13 +504,16 @@ def _update_download(download_url: str) -> Tuple[bool, str]:
 
 
 def _update_restart_env_whitelist() -> Dict[str, str]:
-    """Env vars to pass to the updater-helper so the exec'd binary gets a clean env (no _MEIPASS/LD_LIBRARY_PATH from PyInstaller)."""
+    """Env vars to pass to the updater-helper so the exec'd binary gets a clean env (no _MEIPASS/LD_LIBRARY_PATH from PyInstaller) but keeps theme/session."""
     allow = {
         "HOME", "PATH", "USER", "LOGNAME", "SHELL",
         "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "XDG_SESSION_TYPE",
+        "XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "DESKTOP_SESSION",
         "LANG", "LC_ALL", "LC_CTYPE", "LANGUAGE",
         "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS",
         "TMPDIR", "TEMP", "TMP",
+        "QT_QPA_PLATFORM_THEME", "QT_QPA_PLATFORM", "QT_STYLE_OVERRIDE",
+        "GTK_THEME", "GDK_BACKEND", "COLORSCHEME",
     }
     return {k: v for k, v in os.environ.items() if k in allow and v is not None}
 
