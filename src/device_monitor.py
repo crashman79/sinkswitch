@@ -6,7 +6,8 @@ Device monitoring module for detecting and tracking audio output devices
 import logging
 import subprocess
 import json
-from typing import Dict, List, Optional, Callable, Set
+from collections import defaultdict
+from typing import Dict, List, Optional, Callable, Set, Tuple
 from dataclasses import dataclass
 import time
 import threading
@@ -264,6 +265,20 @@ class DeviceMonitor:
         device['device_type'] = self._classify_device_type(device)
         device['friendly_name'] = self._get_friendly_name(device)
 
+    def _finalize_sink_devices(self, devices: List[Dict]) -> List[Dict]:
+        """Drop incomplete pactl sink blocks; normalize id/name (avoids KeyError in GUI/monitor)."""
+        out: List[Dict] = []
+        for d in devices:
+            dev_id = (d.get('id') or d.get('name') or '').strip()
+            if not dev_id:
+                logger.debug("Skipping sink entry without id/name: %s", d)
+                continue
+            d['id'] = dev_id
+            if not d.get('name'):
+                d['name'] = dev_id
+            out.append(d)
+        return out
+
     def _get_pipewire_devices(self) -> List[Dict]:
         """Get devices using PipeWire"""
         try:
@@ -310,7 +325,7 @@ class DeviceMonitor:
                 self._enrich_device(current_device)
                 devices.append(current_device)
             
-            return devices
+            return self._finalize_sink_devices(devices)
         except Exception as e:
             logger.error(f"Failed to get PipeWire devices: {e}")
             return []
@@ -360,7 +375,7 @@ class DeviceMonitor:
                 self._enrich_device(current_device)
                 devices.append(current_device)
             
-            return devices
+            return self._finalize_sink_devices(devices)
         except Exception as e:
             logger.error(f"Failed to get PulseAudio devices: {e}")
             return []
@@ -568,8 +583,8 @@ class DeviceMonitor:
         if len(current_devices) != len(self.last_devices):
             return True
         
-        current_ids = {d['id'] for d in current_devices}
-        last_ids = {d['id'] for d in self.last_devices}
+        current_ids = {d.get('id') for d in current_devices if d.get('id')}
+        last_ids = {d.get('id') for d in self.last_devices if d.get('id')}
         
         if current_ids != last_ids:
             return True
@@ -577,7 +592,7 @@ class DeviceMonitor:
         # Check connection state changes
         for device in current_devices:
             last_device = next(
-                (d for d in self.last_devices if d['id'] == device['id']),
+                (d for d in self.last_devices if d.get('id') == device.get('id')),
                 None
             )
             if last_device and device.get('connected') != last_device.get('connected'):
@@ -596,8 +611,10 @@ class DeviceMonitor:
                 ['pactl', 'list', 'sink-inputs'],
                 capture_output=True,
                 text=True,
-                check=True
+                check=False,
             )
+            if result.returncode != 0:
+                return []
             
             streams = []
             current_stream = {}
@@ -652,11 +669,47 @@ class DeviceMonitor:
                 out.add(v)
         return out
 
+    @staticmethod
+    def _bluez_mac_from_sink_id(sink_id: str) -> Optional[str]:
+        """MAC segment from e.g. bluez_output.00_02_3C_AD_09_85.2 → 00_02_3C_AD_09_85."""
+        if not sink_id or 'bluez' not in sink_id.lower():
+            return None
+        parts = sink_id.split('.')
+        return parts[1] if len(parts) >= 2 else None
+
+    def _bluez_macs_from_rule_targets(self, rule_target_ids: Set[str]) -> Set[str]:
+        return {m for tid in rule_target_ids if (m := self._bluez_mac_from_sink_id(tid))}
+
+    def _bluez_snapshots_for_macs(
+        self, devices: List[Dict], macs: Set[str]
+    ) -> Dict[str, Tuple[Tuple[str, bool], ...]]:
+        """Per-MAC sorted (sink_id, connected) tuples for comparing reconnect / profile churn."""
+        by_mac: Dict[str, List[Tuple[str, bool]]] = defaultdict(list)
+        for d in devices:
+            did = d.get('id') or ''
+            m = self._bluez_mac_from_sink_id(did)
+            if m in macs:
+                by_mac[m].append((did, bool(d.get('connected'))))
+        return {m: tuple(sorted(by_mac[m])) for m in macs}
+
+    def _bluetooth_rule_target_state_changed(self, current_devices: List[Dict], rule_target_ids: Set[str]) -> bool:
+        """True when a rule-target BT device (by MAC) appeared, vanished, renumbered, or toggled connected."""
+        macs = self._bluez_macs_from_rule_targets(rule_target_ids)
+        if not macs:
+            return False
+        return self._bluez_snapshots_for_macs(self.last_devices, macs) != self._bluez_snapshots_for_macs(
+            current_devices, macs
+        )
+
     def _device_change_involves_rules(self, current_devices: List[Dict], rule_target_ids: Set[str]) -> bool:
-        """True if connection state changed for any device that is a rule target."""
+        """True if connection state changed for any device that is a rule target.
+
+        Bluetooth sinks are matched by MAC: PipeWire often creates a new sink suffix after reconnect
+        (e.g. .1 → .2) while YAML still references the old id — strict id-only checks would skip routing.
+        """
         if not rule_target_ids:
             return True
-        last_by_id = {d['id']: d for d in self.last_devices}
+        last_by_id = {d['id']: d for d in self.last_devices if d.get('id')}
         for d in current_devices:
             did = d.get('id')
             if did not in rule_target_ids:
@@ -666,9 +719,12 @@ class DeviceMonitor:
                 return True  # new rule-target device appeared
             if d.get('connected') != old.get('connected'):
                 return True
+        current_ids = {d.get('id') for d in current_devices if d.get('id')}
         for did in rule_target_ids:
-            if did in last_by_id and did not in {d['id'] for d in current_devices}:
+            if did in last_by_id and did not in current_ids:
                 return True  # rule-target device disappeared
+        if self._bluetooth_rule_target_state_changed(current_devices, rule_target_ids):
+            return True
         return False
 
     @staticmethod
@@ -710,8 +766,8 @@ class DeviceMonitor:
         if not self.last_devices:
             return False
         
-        current_ids = {d['id'] for d in current_devices}
-        last_ids = {d['id'] for d in self.last_devices}
+        current_ids = {d.get('id') for d in current_devices if d.get('id')}
+        last_ids = {d.get('id') for d in self.last_devices if d.get('id')}
         
         # Check for new or removed devices
         added = current_ids - last_ids

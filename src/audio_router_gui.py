@@ -4,7 +4,7 @@ SinkSwitch – standalone GUI app for per-app audio routing.
 Device monitoring and routing run inside this app; no systemd or install script required.
 
 Requirements: Python 3.8+, PyQt6, PyYAML (pip install -r requirements.txt)
-Run: python3 run_app.py   (from the audio-router directory)
+Run: python3 run_app.py   (from the repository root)
 """
 
 import sys
@@ -12,6 +12,7 @@ import os
 import fcntl
 import json
 import logging
+import shlex
 import shutil
 import subprocess
 import threading
@@ -240,6 +241,10 @@ class MonitorThread(QThread):
                             f"{r.get('rule_name', 'Route')}: {r.get('message', '')}",
                         )
 
+            # One shot on start/restart: watch loop can skip the first tick when rules_ref filters
+            # device/stream events (e.g. no players yet); BT reconnect is fixed separately in DeviceMonitor.
+            apply_rules()
+
             monitor.watch_devices(
                 apply_rules,
                 config_regen_callback=regenerate_and_reload,
@@ -319,10 +324,13 @@ class RuleEditorDialog(QDialog):
         layout.addWidget(QLabel("Target Device:"))
         self.device_combo = QComboBox()
         for device in self.devices:
+            did = device.get('id')
+            if not did:
+                continue
             friendly = device.get('friendly_name') or device.get('name', '')
             dtype = device.get('device_type', '')
             display_name = f"{friendly} ({dtype})" if dtype else friendly
-            self.device_combo.addItem(display_name, device['id'])
+            self.device_combo.addItem(display_name, did)
         
         # Select current device if editing
         current_target = self.rule.get('target_device', '')
@@ -590,11 +598,21 @@ def _update_restart_to_apply() -> Tuple[bool, str]:
 
 
 def _get_launch_cmd_for_desktop() -> str:
-    """Preferred Exec= for desktop/autostart: use ~/.local/bin/sinkswitch if installed there, else current binary."""
+    """Preferred Exec= for desktop/autostart.
+
+    Menu launchers do not set cwd to the repo; ``python3 -m run_app`` only works when the cwd is the repo root,
+    so from a shortcut it fails while the same command in a terminal appears fine.
+    """
     local_bin = Path.home() / ".local" / "bin" / "sinkswitch"
     if local_bin.is_file() and os.access(local_bin, os.X_OK):
-        return str(local_bin)
-    return os.environ.get("AUDIO_ROUTER_LAUNCH_CMD", f"{sys.executable} -m run_app")
+        return shlex.quote(str(local_bin))
+    env_cmd = os.environ.get("AUDIO_ROUTER_LAUNCH_CMD", "").strip()
+    if env_cmd:
+        return env_cmd
+    run_app = Path(__file__).resolve().parent.parent / "run_app.py"
+    if run_app.is_file():
+        return shlex.join([sys.executable, str(run_app)])
+    return shlex.join([sys.executable, "-m", "run_app"])
 
 
 def _create_app_menu_shortcut() -> Optional[Path]:
@@ -603,7 +621,7 @@ def _create_app_menu_shortcut() -> Optional[Path]:
     app_dir.mkdir(parents=True, exist_ok=True)
     path = app_dir / "sinkswitch.desktop"
     exec_cmd = _get_launch_cmd_for_desktop()
-    # Omit Path= so the launcher does not set CWD to a dev folder (config is in ~/.config/sinkswitch).
+    # No Path=: Exec uses absolute paths to python + run_app.py (or ~/.local/bin/sinkswitch).
     content = f"""[Desktop Entry]
 Type=Application
 Name=SinkSwitch
@@ -1276,8 +1294,11 @@ class AudioRouterGUI(QMainWindow):
         except Exception:
             default_id = None
         for d in self.devices:
-            friendly = d.get('friendly_name') or d.get('name') or d.get('id', '')
-            self.default_sink_combo.addItem(friendly, d['id'])
+            did = d.get('id')
+            if not did:
+                continue
+            friendly = d.get('friendly_name') or d.get('name') or did
+            self.default_sink_combo.addItem(friendly, did)
         idx = next((i for i in range(self.default_sink_combo.count()) if self.default_sink_combo.itemData(i) == default_id), 0)
         self.default_sink_combo.setCurrentIndex(idx)
         self.default_sink_combo.blockSignals(False)
@@ -1315,7 +1336,8 @@ class AudioRouterGUI(QMainWindow):
             type_icon = self.get_device_type_icon(device_type)
             self.devices_table.setItem(i, 2, QTableWidgetItem(f"{type_icon} {device_type}"))
             # Device ID (internal sink name)
-            device_id = device['id'][:50] + '...' if len(device['id']) > 50 else device['id']
+            raw_id = device.get('id') or ''
+            device_id = raw_id[:50] + '...' if len(raw_id) > 50 else raw_id
             self.devices_table.setItem(i, 3, QTableWidgetItem(device_id))
     
     def _get_sink_index_to_name(self) -> Dict[str, str]:
@@ -1615,7 +1637,10 @@ class AudioRouterGUI(QMainWindow):
 def main():
     """Main entry point"""
     logger.info("Starting Audio Router GUI")
-    
+    # After some Mesa/GPU updates Qt can crash during GL init; optional software GL for the UI only.
+    if os.environ.get("SINKSWITCH_USE_SOFTWARE_OPENGL", "").lower() in ("1", "true", "yes", "on"):
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL, True)
+
     app = QApplication(sys.argv)
     app.setApplicationName("SinkSwitch")
     # Don't quit when window is closed; we hide to tray or quit explicitly

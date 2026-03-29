@@ -25,21 +25,20 @@ jobs:
       - name: Set version from tag
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          printf '__version__ = "%s"\n' "$VERSION" > audio-router/src/_version.py
+          printf '__version__ = "%s"\n' "$VERSION" > src/_version.py
 
       - name: Build binary
         run: |
-          cd audio-router
           python3 -m venv .venv-build
-          .venv-build/bin/pip install -q pyinstaller
-          .venv-build/bin/pip install -q -r requirements.txt
+          .venv-build/bin/python -m pip install -q pyinstaller
+          .venv-build/bin/python -m pip install -q -r requirements.txt
           .venv-build/bin/python -m PyInstaller run_app.spec
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: sinkswitch-linux-x64
-          path: audio-router/dist/sinkswitch
+          path: dist/sinkswitch
 
   release:
     needs: build-linux

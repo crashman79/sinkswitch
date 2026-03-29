@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Standalone launcher for SinkSwitch.
-- As script:  python3 run_app.py  (from audio-router directory)
+- As script:  python3 run_app.py  (from repo root)
 - As binary:  ./sinkswitch  (after building with build.sh)
 
 Config on first run: ~/.config/sinkswitch/ (or AUDIO_ROUTER_CONFIG).

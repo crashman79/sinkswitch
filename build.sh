@@ -13,9 +13,10 @@ if [ ! -d "$VENV_DIR" ]; then
     python3 -m venv "$VENV_DIR"
 fi
 echo "Using venv: $VENV_DIR"
-"$VENV_DIR/bin/pip" install -q pyinstaller
+# Use python -m pip so a moved/renamed project dir does not break (pip's shebang is absolute).
+"$VENV_DIR/bin/python" -m pip install -q pyinstaller
 # App deps so PyInstaller can trace and bundle them (yaml, PyQt6, etc.)
-"$VENV_DIR/bin/pip" install -q -r requirements.txt
+"$VENV_DIR/bin/python" -m pip install -q -r requirements.txt
 
 # Version from git tag (e.g. v0.7.12 -> 0.7.12) so the binary reports the release version
 VERSION="$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "0.0.0")"

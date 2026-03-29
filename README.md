@@ -12,14 +12,13 @@ Route application audio to different outputs (Bluetooth, USB, HDMI, etc.) by rul
 
 ## Install and run
 
-1. **Download** the Linux binary from [Releases](https://github.com/crashman79/bluetooth-audio-router/releases).
+1. **Download** the Linux binary from [Releases](https://github.com/crashman79/sinkswitch/releases).
 2. **Run** it (e.g. `chmod +x sinkswitch && ./sinkswitch`).
 3. On first run the app creates config at `~/.config/sinkswitch/`. Use the GUI to add routing rules and start the router. **Settings** → Add to application menu or launch at login if you like.
 
 ## Run from source
 
 ```bash
-cd audio-router
 pip install -r requirements.txt
 python3 run_app.py
 ```
@@ -29,10 +28,38 @@ Same config and behavior; config dir is `~/.config/sinkswitch/` (or set `AUDIO_R
 ### Build the binary yourself
 
 ```bash
-cd audio-router
 ./build.sh
 ./dist/sinkswitch
 ```
+
+### Releasing a new version
+
+Version comes from the **git tag** at build time. The GitHub Action builds the binary and creates the release when you push a tag.
+
+1. Tag and push: `git tag v0.7.11 && git push origin v0.7.11`
+2. The workflow builds the binary with that version and creates the GitHub release with the asset.
+
+For a **local** build, run `./build.sh` — it sets the version from the current repo tag.
+
+## Config and rules
+
+- **Config dir**: `~/.config/sinkswitch/` (or `AUDIO_ROUTER_CONFIG`)
+- **Bundled example layout**: `config/routing_rules.yaml` in this repo (the app uses `~/.config/sinkswitch/config/routing_rules.yaml` at runtime)
+
+Use the GUI to add rules and pick devices; the **Default output** in the toolbar is where unmatched apps go. See `examples/` for YAML samples.
+
+## CLI (scripting / debugging)
+
+With dependencies installed from the repository root:
+
+```bash
+python3 src/audio_router.py list-devices
+python3 src/audio_router.py generate-config --output config/routing_rules.yaml
+python3 src/audio_router.py apply-rules config/routing_rules.yaml
+python3 src/audio_router.py monitor config/routing_rules.yaml
+```
+
+The GUI runs the monitor internally; these commands are optional.
 
 ## Requirements
 
