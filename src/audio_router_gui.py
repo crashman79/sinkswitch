@@ -758,12 +758,10 @@ class AudioRouterGUI(QMainWindow):
         show_act = self.tray_menu.addAction("Show")
         show_act.triggered.connect(self._show_from_tray)
         self.tray_menu.addSeparator()
-        self.tray_start_act = self.tray_menu.addAction("▶ Start router")
-        self.tray_start_act.triggered.connect(self.start_service)
+        self.tray_start_or_restart_act = self.tray_menu.addAction("▶ Start router")
+        self.tray_start_or_restart_act.triggered.connect(self._on_start_or_restart_clicked)
         self.tray_stop_act = self.tray_menu.addAction("⏸ Stop router")
         self.tray_stop_act.triggered.connect(self.stop_service)
-        self.tray_restart_act = self.tray_menu.addAction("🔄 Restart router")
-        self.tray_restart_act.triggered.connect(self.restart_service)
         self.tray_menu.addSeparator()
         quit_act = self.tray_menu.addAction("Quit")
         quit_act.triggered.connect(self._quit_from_tray)
@@ -773,13 +771,14 @@ class AudioRouterGUI(QMainWindow):
         self.tray_icon.show()
 
     def _update_tray_menu_state(self):
-        """Set Start/Stop/Restart enabled based on router state."""
-        if not hasattr(self, 'tray_start_act'):
+        """Set Start/Restart label and Stop enabled based on router state."""
+        if not hasattr(self, 'tray_start_or_restart_act'):
             return
         running = self._router_running()
-        self.tray_start_act.setEnabled(not running)
+        self.tray_start_or_restart_act.setText(
+            "🔄 Restart router" if running else "▶ Start router"
+        )
         self.tray_stop_act.setEnabled(running)
-        self.tray_restart_act.setEnabled(running)
 
     def _tray_icon_pixmap(self) -> QIcon:
         size = QSize(22, 22)
@@ -826,7 +825,7 @@ class AudioRouterGUI(QMainWindow):
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle("SinkSwitch")
-        self.setMinimumSize(960, 560)
+        self.setMinimumSize(300, 300)
         self.resize(1000, 620)
         
         # Central widget
@@ -850,25 +849,21 @@ class AudioRouterGUI(QMainWindow):
         # Default (fallback) output: where unmatched audio goes
         toolbar_layout.addWidget(QLabel("Default output:"))
         self.default_sink_combo = QComboBox()
-        self.default_sink_combo.setMinimumWidth(200)
+        self.default_sink_combo.setMinimumWidth(60)
         self.default_sink_combo.setToolTip("Sink used for apps that don't match any rule. New streams go here.")
         self.default_sink_combo.currentIndexChanged.connect(self._on_default_sink_changed)
         toolbar_layout.addWidget(self.default_sink_combo)
         
         toolbar_layout.addStretch()
         
-        # Service control buttons
-        self.start_btn = QPushButton("▶ Start")
-        self.start_btn.clicked.connect(self.start_service)
-        toolbar_layout.addWidget(self.start_btn)
-        
+        # Service control: one Start/Restart button + Stop (disabled when not running)
+        self.start_or_restart_btn = QPushButton("▶ Start")
+        self.start_or_restart_btn.clicked.connect(self._on_start_or_restart_clicked)
+        toolbar_layout.addWidget(self.start_or_restart_btn)
+
         self.stop_btn = QPushButton("⏸ Stop")
         self.stop_btn.clicked.connect(self.stop_service)
         toolbar_layout.addWidget(self.stop_btn)
-        
-        self.restart_btn = QPushButton("🔄 Restart")
-        self.restart_btn.clicked.connect(self.restart_service)
-        toolbar_layout.addWidget(self.restart_btn)
         
         main_layout.addLayout(toolbar_layout)
         
@@ -1107,31 +1102,75 @@ class AudioRouterGUI(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout()
         widget.setLayout(layout)
-        layout.addWidget(QLabel("<b>SinkSwitch</b>"))
-        layout.addWidget(QLabel(f"Version {__version__}"))
-        layout.addSpacing(12)
-        layout.addWidget(QLabel("<b>Default routing (out of the box)</b>"))
-        layout.addWidget(QLabel(
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        scroll_inner = QWidget()
+        sl = QVBoxLayout(scroll_inner)
+        sl.setContentsMargins(0, 0, 0, 0)
+
+        def _wrap_rich(text: str) -> QLabel:
+            lab = QLabel(text)
+            lab.setWordWrap(True)
+            lab.setTextFormat(Qt.TextFormat.RichText)
+            sl.addWidget(lab)
+            return lab
+
+        def _wrap_plain(text: str) -> QLabel:
+            lab = QLabel(text)
+            lab.setWordWrap(True)
+            sl.addWidget(lab)
+            return lab
+
+        _wrap_rich("<b>SinkSwitch</b>")
+        _wrap_plain(f"Version {__version__}")
+        sl.addSpacing(12)
+        _wrap_rich("<b>Default routing (out of the box)</b>")
+        _wrap_plain(
             "On first run, SinkSwitch creates a config and may auto-generate routing rules from your connected devices "
             "(e.g. browsers, meetings, media → Bluetooth or USB headset). You can edit or remove these in the Routing Rules tab. "
-            "Until you click <b>Start</b>, the router does nothing. Once running, matched streams follow rules; "
-            "everything else goes to the <b>Default output</b> in the toolbar."
-        ))
-        layout.addSpacing(12)
-        layout.addWidget(QLabel("<b>Technology</b>"))
-        layout.addWidget(QLabel("• Python 3, PyQt6 (GUI)"))
-        layout.addWidget(QLabel("• PipeWire / PulseAudio (pactl)"))
-        layout.addWidget(QLabel("• YAML config, XDG autostart"))
-        layout.addSpacing(8)
-        layout.addWidget(QLabel("<b>Config and routing rules</b>"))
-        layout.addWidget(QLabel("All settings and the rules file are stored under the config directory. Override with the environment variable AUDIO_ROUTER_CONFIG if needed."))
-        layout.addWidget(QLabel(f"Config directory: {self.config_base}"))
-        layout.addWidget(QLabel(f"Routing rules file: {self.config_file}"))
-        layout.addSpacing(8)
+            "Until you click Start, the router does nothing. Once running, matched streams follow rules; "
+            "everything else goes to the Default output in the toolbar."
+        )
+        sl.addSpacing(12)
+        _wrap_rich("<b>Technology</b>")
+        _wrap_plain("• Python 3, PyQt6 (GUI)")
+        _wrap_plain("• PipeWire / PulseAudio (pactl)")
+        _wrap_plain("• YAML config, XDG autostart")
+        sl.addSpacing(8)
+        _wrap_rich("<b>Config and routing rules</b>")
+        _wrap_plain(
+            "All settings and the rules file are stored under the config directory. "
+            "Override with the environment variable AUDIO_ROUTER_CONFIG if needed."
+        )
+        _wrap_plain(f"Config directory: {self.config_base}")
+        _wrap_plain(f"Routing rules file: {self.config_file}")
+        sl.addSpacing(8)
         self.about_rules_count_label = QLabel(f"<b>Routing rules</b>: {len(self.rules)}")
-        layout.addWidget(self.about_rules_count_label)
-        layout.addSpacing(12)
-        layout.addWidget(QLabel("<b>Updates</b>"))
+        self.about_rules_count_label.setWordWrap(True)
+        self.about_rules_count_label.setTextFormat(Qt.TextFormat.RichText)
+        sl.addWidget(self.about_rules_count_label)
+        sl.addSpacing(12)
+        _wrap_rich("<b>Feedback</b>")
+        feedback_label = QLabel(
+            '<a href="mailto:githubfeedback.manger043@simplelogin.com">githubfeedback.manger043@simplelogin.com</a>'
+        )
+        feedback_label.setWordWrap(True)
+        feedback_label.setOpenExternalLinks(True)
+        feedback_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        sl.addWidget(feedback_label)
+        sl.addStretch(1)
+
+        scroll.setWidget(scroll_inner)
+        layout.addWidget(scroll, stretch=1)
+
+        updates_heading = QLabel("<b>Updates</b>")
+        updates_heading.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(updates_heading)
         update_row = QHBoxLayout()
         self.update_check_btn = QPushButton("Check for updates")
         self.update_check_btn.clicked.connect(self._on_check_for_updates)
@@ -1144,7 +1183,7 @@ class AudioRouterGUI(QMainWindow):
         self.update_restart_btn.clicked.connect(self._on_restart_to_apply)
         self.update_restart_btn.hide()
         update_row.addWidget(self.update_check_btn)
-        update_row.addWidget(self.update_status_label)
+        update_row.addWidget(self.update_status_label, stretch=1)
         update_row.addStretch()
         layout.addLayout(update_row)
         update_btn_row = QHBoxLayout()
@@ -1155,12 +1194,6 @@ class AudioRouterGUI(QMainWindow):
         self._update_download_url = None
         self._update_check_thread = None
         self._update_download_thread = None
-        layout.addSpacing(8)
-        layout.addWidget(QLabel("<b>Feedback</b>"))
-        feedback_label = QLabel('<a href="mailto:githubfeedback.manger043@simplelogin.com">githubfeedback.manger043@simplelogin.com</a>')
-        feedback_label.setOpenExternalLinks(True)
-        layout.addWidget(feedback_label)
-        layout.addStretch()
         return widget
 
     def _on_check_for_updates(self):
@@ -1417,7 +1450,7 @@ class AudioRouterGUI(QMainWindow):
         return self.monitor_thread is not None and self.monitor_thread.isRunning()
 
     def update_service_status(self):
-        """Update router status and Start/Stop/Restart button states."""
+        """Update router status and Start/Restart + Stop button states."""
         running = self._router_running()
         if running:
             self.status_label.setText("Router: 🟢 Running")
@@ -1425,9 +1458,8 @@ class AudioRouterGUI(QMainWindow):
         else:
             self.status_label.setText("Router: 🔴 Stopped")
             self.status_label.setStyleSheet("color: red; font-weight: bold; padding: 5px;")
-        self.start_btn.setEnabled(not running)
+        self.start_or_restart_btn.setText("🔄 Restart" if running else "▶ Start")
         self.stop_btn.setEnabled(running)
-        self.restart_btn.setEnabled(running)
     
     def refresh_devices(self):
         """Manually refresh device list"""
@@ -1597,6 +1629,12 @@ class AudioRouterGUI(QMainWindow):
         self.monitor_thread.wait(10000)
         self.monitor_thread = None
         self.update_service_status()
+
+    def _on_start_or_restart_clicked(self):
+        if self._router_running():
+            self.restart_service()
+        else:
+            self.start_service()
 
     def start_service(self):
         """Start the router (in-app)."""
