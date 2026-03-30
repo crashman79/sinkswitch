@@ -4,7 +4,6 @@ Intelligent audio routing engine that automatically detects device types
 and routes audio based on device capabilities and priorities
 """
 
-import subprocess
 import logging
 from typing import Dict, List, Optional
 from device_monitor import DeviceMonitor

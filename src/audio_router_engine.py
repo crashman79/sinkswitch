@@ -7,6 +7,7 @@ import subprocess
 import logging
 from typing import Dict, List, Optional
 from device_monitor import DeviceMonitor
+from host_command import host_cmd
 
 logger = logging.getLogger(__name__)
 
@@ -226,7 +227,7 @@ class AudioRouterEngine:
         """
         try:
             result = subprocess.run(
-                ['pactl', 'list', 'sink-inputs'],
+                host_cmd(['pactl', 'list', 'sink-inputs']),
                 capture_output=True,
                 text=True,
                 timeout=5
@@ -251,7 +252,7 @@ class AudioRouterEngine:
         """Get running applications from PulseAudio"""
         try:
             result = subprocess.run(
-                ['pactl', 'list', 'sink-inputs'],
+                host_cmd(['pactl', 'list', 'sink-inputs']),
                 capture_output=True,
                 text=True,
                 timeout=5
@@ -296,7 +297,7 @@ class AudioRouterEngine:
             # This is a simplified example - real implementation would need
             # to properly identify node IDs and create links
             subprocess.run(
-                ['pw-cli', 'set', app_name, 'target.object', target_device],
+                host_cmd(['pw-cli', 'set', app_name, 'target.object', target_device]),
                 capture_output=True,
                 timeout=5,
                 check=False
@@ -319,7 +320,7 @@ class AudioRouterEngine:
         """
         try:
             result = subprocess.run(
-                ['pactl', 'list', 'sinks'],
+                host_cmd(['pactl', 'list', 'sinks']),
                 capture_output=True,
                 text=True,
                 timeout=5
@@ -366,7 +367,7 @@ class AudioRouterEngine:
             
             # Get sink input index and current sink for the application (single pass)
             result = subprocess.run(
-                ['pactl', 'list', 'sink-inputs'],
+                host_cmd(['pactl', 'list', 'sink-inputs']),
                 capture_output=True,
                 text=True,
                 timeout=5
@@ -399,7 +400,7 @@ class AudioRouterEngine:
                 return False
             # Move sink input to target sink (by number, not device name)
             result = subprocess.run(
-                ['pactl', 'move-sink-input', sink_input_id, target_sink],
+                host_cmd(['pactl', 'move-sink-input', sink_input_id, target_sink]),
                 capture_output=True,
                 text=True,
                 timeout=5,

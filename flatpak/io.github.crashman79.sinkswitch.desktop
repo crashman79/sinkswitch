@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=SinkSwitch
+Comment=Per-application audio routing for PipeWire and PulseAudio
+Exec=sinkswitch
+Icon=io.github.crashman79.sinkswitch
+Categories=AudioVideo;Audio;
+Terminal=false

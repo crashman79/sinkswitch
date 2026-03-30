@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.crashman79.sinkswitch</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>SinkSwitch</name>
+  <summary>Route application audio to Bluetooth, USB, HDMI, and other outputs</summary>
+  <description>
+    <p>
+      SinkSwitch lets you pick a default output and define rules so specific applications
+      use the device you choose. It runs the router inside the GUI and uses PipeWire or
+      PulseAudio on your system (host tools are invoked from the sandbox).
+    </p>
+  </description>
+  <developer id="github.com/crashman79">
+    <name>crashman79</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <url type="homepage">https://github.com/crashman79/sinkswitch</url>
+  <url type="bugtracker">https://github.com/crashman79/sinkswitch/issues</url>
+  <launchable type="desktop-id">io.github.crashman79.sinkswitch.desktop</launchable>
+  <releases>
+    <release version="0.7.18" date="2026-03-29"/>
+  </releases>
+</component>

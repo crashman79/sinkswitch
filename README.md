@@ -12,9 +12,22 @@ Route application audio to different outputs (Bluetooth, USB, HDMI, etc.) by rul
 
 ## Install and run
 
+### Option A: GitHub release (single-file binary)
+
 1. **Download** the Linux binary from [Releases](https://github.com/crashman79/sinkswitch/releases).
 2. **Run** it (e.g. `chmod +x sinkswitch && ./sinkswitch`).
-3. On first run the app creates config at `~/.config/sinkswitch/`. Use the GUI to add routing rules and start the router. **Settings** → Add to application menu or launch at login if you like.
+
+### Option B: Flatpak (build locally)
+
+Uses your system PipeWire/Pulse tools on the host while bundling the GUI. See **[flatpak/README.md](flatpak/README.md)**.
+
+After `flatpak-builder --install`, run `flatpak run io.github.crashman79.sinkswitch`.
+
+### Option C: From source or venv
+
+See **Run from source** below or `packaging/install-user-venv.sh`.
+
+On first run the app creates config at `~/.config/sinkswitch/`. Use the GUI to add routing rules and start the router. **Settings** → Add to application menu or launch at login if you like.
 
 ## Run from source
 
@@ -31,6 +44,8 @@ Same config and behavior; config dir is `~/.config/sinkswitch/` (or set `AUDIO_R
 ./build.sh
 ./dist/sinkswitch
 ```
+
+For a **portable directory** build (same PyInstaller bundle as releases, easier to debug than a single file): `./build.sh --onedir` then run `./dist/sinkswitch/sinkswitch`. For maximum stability on your distro, use **from source** or the venv installer in `packaging/install-user-venv.sh` (see `packaging/README.md`).
 
 ### Releasing a new version
 
