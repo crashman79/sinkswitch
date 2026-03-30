@@ -5,7 +5,7 @@ Audio routing engine - applies routing rules to audio streams
 
 import subprocess
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from device_monitor import DeviceMonitor
 from host_command import host_cmd
 
@@ -307,17 +307,8 @@ class AudioRouterEngine:
             logger.debug(f"PipeWire routing failed: {e}")
             return False
     
-    def _get_sink_number(self, device_name: str) -> Optional[str]:
-        """Convert device name to sink number
-        
-        For Bluetooth devices, matches by MAC address even if suffix differs.
-        
-        Args:
-            device_name: Device name (e.g., alsa_output.pci-0000_0e_00.4.analog-stereo)
-            
-        Returns:
-            Sink number (e.g., "54") or None if not found
-        """
+    def _resolve_sink(self, device_name: str) -> Optional[Tuple[str, str]]:
+        """Return (sink_index, sink_name); BT ids match by MAC if PipeWire renumbered suffix."""
         try:
             result = subprocess.run(
                 host_cmd(['pactl', 'list', 'sinks']),
@@ -325,47 +316,49 @@ class AudioRouterEngine:
                 text=True,
                 timeout=5
             )
-            
             current_sink_id = None
             for line in result.stdout.split('\n'):
                 if 'Sink #' in line:
                     current_sink_id = line.split('#')[1].strip()
                 elif 'Name:' in line:
-                    # Extract the name value
                     name_value = line.split('Name:')[1].strip()
-                    
-                    # Try exact match first
                     if device_name in line or name_value == device_name:
-                        return current_sink_id
-                    
-                    # For Bluetooth devices, try fuzzy matching by MAC address
+                        return (current_sink_id, name_value)
                     if 'bluez' in device_name.lower() and 'bluez' in name_value.lower():
-                        # Extract MAC address from requested device name
                         parts = device_name.split('.')
                         if len(parts) >= 2:
                             mac_address = parts[1]
-                            # Check if this sink has the same MAC address
                             if mac_address in name_value:
-                                logger.debug(f"Fuzzy matched Bluetooth sink '{device_name}' to '{name_value}' (sink #{current_sink_id})")
-                                return current_sink_id
-            
+                                logger.debug(
+                                    f"Fuzzy matched Bluetooth sink '{device_name}' to '{name_value}' (sink #{current_sink_id})"
+                                )
+                                return (current_sink_id, name_value)
             return None
         except Exception as e:
-            logger.debug(f"Failed to get sink number for {device_name}: {e}")
+            logger.debug(f"Failed to resolve sink for {device_name}: {e}")
             return None
+
+    def _get_sink_number(self, device_name: str) -> Optional[str]:
+        r = self._resolve_sink(device_name)
+        return r[0] if r else None
     
     def _route_pa_stream(self, app_name: str, target_device: str) -> bool:
         """Route stream in PulseAudio"""
         try:
-            # Get sink number for target device
-            target_sink = self._get_sink_number(target_device)
-            if not target_sink:
-                logger.debug(f"Could not find sink number for device {target_device}")
+            resolved = self._resolve_sink(target_device)
+            if not resolved:
+                logger.warning("Could not resolve sink for target device %r (not in pactl list sinks)", target_device)
                 return False
+            target_sink_id, target_sink_name = resolved
             
-            logger.debug(f"Looking for app '{app_name}', target sink: {target_sink}")
+            logger.debug(
+                "Looking for app %r, target sink #%s (%s)",
+                app_name,
+                target_sink_id,
+                target_sink_name,
+            )
             
-            # Get sink input index and current sink for the application (single pass)
+            # Collect every sink-input for this app (browsers may open several streams).
             result = subprocess.run(
                 host_cmd(['pactl', 'list', 'sink-inputs']),
                 capture_output=True,
@@ -373,7 +366,7 @@ class AudioRouterEngine:
                 timeout=5
             )
             
-            sink_input_id = None
+            to_move: List[tuple] = []
             current_sink_input = None
             current_sink_num = None
             
@@ -383,35 +376,46 @@ class AudioRouterEngine:
                     current_sink_input = line_stripped.split('#')[1].strip()
                     current_sink_num = None
                 elif current_sink_input and line_stripped.startswith('Sink:'):
-                    # Current sink this input is connected to (skip "Sink Input" lines)
                     parts = line_stripped.split(':', 1)
                     if len(parts) > 1:
                         current_sink_num = parts[1].strip().split()[0] if parts[1].strip() else None
                 elif current_sink_input and 'application.name' in line and app_name in line:
-                    sink_input_id = current_sink_input
-                    break
+                    if current_sink_num is None or current_sink_num != target_sink_id:
+                        to_move.append((current_sink_input, current_sink_num))
             
-            if not sink_input_id:
-                logger.debug(f"Could not find sink input for {app_name}")
+            if not to_move:
+                logger.debug(f"No sink inputs to move for {app_name} (missing or already on target)")
                 return False
-            # Only move if stream is not already on target (avoids no-op moves and duplicate notifications on seek/rewind)
-            if current_sink_num is not None and current_sink_num == target_sink:
-                logger.debug(f"Sink input {sink_input_id} ({app_name}) already on target sink #{target_sink}, skipping move")
-                return False
-            # Move sink input to target sink (by number, not device name)
-            result = subprocess.run(
-                host_cmd(['pactl', 'move-sink-input', sink_input_id, target_sink]),
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False
-            )
-            if result.returncode == 0:
-                logger.debug(f"Moved sink input {sink_input_id} ({app_name}) to sink #{target_sink}")
-                return True
-            else:
-                logger.debug(f"Failed to move sink input {sink_input_id}: {result.stderr}")
-                return False
+
+            any_ok = False
+            for sink_input_id, _ in to_move:
+                for target in (target_sink_name, target_sink_id):
+                    move_res = subprocess.run(
+                        host_cmd(['pactl', 'move-sink-input', sink_input_id, target]),
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        check=False
+                    )
+                    if move_res.returncode == 0:
+                        logger.debug(
+                            "Moved sink input %s (%s) to sink %s",
+                            sink_input_id,
+                            app_name,
+                            target,
+                        )
+                        any_ok = True
+                        break
+                else:
+                    err = (move_res.stderr or move_res.stdout or "").strip()
+                    logger.warning(
+                        "move-sink-input failed for %s → %s / #%s: %s",
+                        sink_input_id,
+                        target_sink_name,
+                        target_sink_id,
+                        err or f"exit {move_res.returncode}",
+                    )
+            return any_ok
         except Exception as e:
             logger.debug(f"PulseAudio routing failed: {e}")
             return False

@@ -37,8 +37,57 @@ jobs:
           name: sinkswitch-linux-x64
           path: dist/sinkswitch
 
+  build-flatpak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set version and sync Flatpak metainfo
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          printf '__version__ = "%s"\n' "$VERSION" > src/_version.py
+          DATE="$(date -u +%Y-%m-%d)"
+          python3 << PY
+          import pathlib, re
+          v = "${VERSION}"
+          d = "${DATE}"
+          p = pathlib.Path("flatpak/io.github.crashman79.sinkswitch.metainfo.xml")
+          text = p.read_text()
+          text, n = re.subn(
+              r'<release version="[^"]*" date="[^"]*"\s*/>',
+              f'<release version="{v}" date="{d}"/>',
+              text,
+              count=1,
+          )
+          if n != 1:
+              raise SystemExit(f"expected 1 release replace, got {n}")
+          p.write_text(text)
+          PY
+
+      - name: Install Flatpak build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install -y --noninteractive org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+
+      - name: Build Flatpak repository
+        run: |
+          flatpak-builder --user --repo=repo --force-clean build-flatpak flatpak/io.github.crashman79.sinkswitch.yml
+
+      - name: Create single-file bundle
+        run: |
+          flatpak build-bundle repo "sinkswitch-${VERSION}-x86_64.flatpak" io.github.crashman79.sinkswitch
+
+      - name: Upload Flatpak artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: sinkswitch-flatpak-x86_64
+          path: sinkswitch-*-x86_64.flatpak
+
   release:
-    needs: build-linux
+    needs: [build-linux, build-flatpak]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -47,14 +96,24 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download artifact
+      - name: Set version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Download Linux binary
         uses: actions/download-artifact@v8
         with:
           name: sinkswitch-linux-x64
+          path: _release
+
+      - name: Download Flatpak bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: sinkswitch-flatpak-x86_64
+          path: _release
 
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
-          artifacts: sinkswitch
+          artifacts: "_release/sinkswitch,_release/sinkswitch-${{ env.VERSION }}-x86_64.flatpak"
           generateReleaseNotes: true
           token: ${{ secrets.GITHUB_TOKEN }}

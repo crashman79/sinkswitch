@@ -17,6 +17,11 @@ try:
 except Exception:
     pass
 
+_brand_icon = []
+_p = app_dir / 'data' / 'icons' / 'io.github.crashman79.sinkswitch.png'
+if _p.is_file():
+    _brand_icon = [(str(_p), 'data/icons')]
+
 a = Analysis(
     [str(app_dir / 'run_app.py')],
     pathex=[str(src_dir)],
@@ -30,7 +35,7 @@ a = Analysis(
         'yaml',
         'certifi',
     ],
-    datas=_certifi_datas,
+    datas=_certifi_datas + _brand_icon,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -60,6 +60,32 @@ def _config_base() -> Path:
     p = os.environ.get("AUDIO_ROUTER_CONFIG")
     return Path(p) if p else Path.home() / ".config" / "sinkswitch"
 
+
+def _brand_icon_path() -> Optional[Path]:
+    """Packaged PNG/SVG under data/icons (same artwork as Flatpak hicolor)."""
+    png = "io.github.crashman79.sinkswitch.png"
+    svg = "io.github.crashman79.sinkswitch.svg"
+    wd = os.environ.get("AUDIO_ROUTER_WORKING_DIR")
+    if wd:
+        base = Path(wd) / "data" / "icons"
+        for name in (png, svg):
+            p = base / name
+            if p.is_file():
+                return p
+    base = Path(__file__).resolve().parent.parent / "data" / "icons"
+    for name in (png, svg):
+        p = base / name
+        if p.is_file():
+            return p
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        base = Path(sys._MEIPASS) / "data" / "icons"
+        for name in (png, svg):
+            p = base / name
+            if p.is_file():
+                return p
+    return None
+
+
 # In-memory log capture for standalone (no journal)
 _log_buffer: List[str] = []
 _log_buffer_max = 500
@@ -706,6 +732,9 @@ class AudioRouterGUI(QMainWindow):
         self.stream_thread = None
 
         self.init_ui()
+        _bp = _brand_icon_path()
+        if _bp:
+            self.setWindowIcon(QIcon(str(_bp)))
         self._setup_tray()
         self.load_config()
         self.start_background_updates()
@@ -782,6 +811,12 @@ class AudioRouterGUI(QMainWindow):
         self.tray_stop_act.setEnabled(running)
 
     def _tray_icon_pixmap(self) -> QIcon:
+        bp = _brand_icon_path()
+        if bp:
+            ic = QIcon(str(bp))
+            pm = ic.pixmap(QSize(22, 22))
+            if not pm.isNull():
+                return QIcon(pm)
         size = QSize(22, 22)
         pixmap = QPixmap(size)
         pixmap.fill(Qt.GlobalColor.transparent)
@@ -1686,6 +1721,9 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("SinkSwitch")
+    _app_icon = _brand_icon_path()
+    if _app_icon:
+        app.setWindowIcon(QIcon(str(_app_icon)))
     # Don't quit when window is closed; we hide to tray or quit explicitly
     app.setQuitOnLastWindowClosed(False)
     # Apply saved theme so restart-after-update uses user choice (env whitelist may drop DE theme vars)
