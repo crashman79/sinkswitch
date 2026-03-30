@@ -32,14 +32,15 @@ class DeviceMonitor:
     
     def __init__(self):
         self.devices = {}
-        self.last_devices = {}
+        self.last_devices: List[Dict] = []
         self.last_streams = []  # Track audio streams
         self._detect_audio_backend()
         self.bluetooth_devices_cache = {}  # Cache of Bluetooth device info
         self.bluetooth_profile_state = {}  # Track Bluetooth device profiles
         self.last_config_regeneration = 0  # Timestamp of last config regeneration
         self.config_regeneration_cooldown = 10  # Minimum seconds between regenerations
-    
+        self._last_periodic_rule_apply_ts = 0.0
+
     def _detect_audio_backend(self):
         """Detect which audio backend is available (PipeWire or PulseAudio)"""
         try:
@@ -460,6 +461,11 @@ class DeviceMonitor:
             else:
                 logger.debug("Skipping config regeneration (cooldown)")
 
+        now = time.time()
+        periodic_rules = bool(rules_ref) and (now - self._last_periodic_rule_apply_ts >= 15.0)
+        if periodic_rules:
+            self._last_periodic_rule_apply_ts = now
+
         device_changed = self._devices_changed(current_devices)
         stream_changed = self._streams_changed(current_streams)
         if rules_ref:
@@ -467,12 +473,14 @@ class DeviceMonitor:
             device_changed = device_changed and rule_target_ids and self._device_change_involves_rules(current_devices, rule_target_ids)
             stream_changed = stream_changed and self._stream_change_involves_rules(current_streams, rules_ref)
 
-        if device_changed or stream_changed:
-            if device_changed and stream_changed:
+        if periodic_rules or device_changed or stream_changed:
+            if periodic_rules and not device_changed and not stream_changed:
+                logger.debug("Periodic routing re-apply")
+            elif device_changed and stream_changed:
                 logger.info("Devices and audio streams changed - applying routing rules")
             elif device_changed:
                 logger.info("Device configuration changed - applying routing rules")
-            else:
+            elif stream_changed:
                 logger.info("Audio streams changed - applying routing rules")
             self.last_devices = current_devices
             self.last_streams = current_streams
@@ -605,7 +613,10 @@ class DeviceMonitor:
         """Get list of active audio streams (sink-inputs)
         
         Returns:
-            List of stream dictionaries with 'index' and 'application_name'
+            List of stream dictionaries with 'index', 'sink' (numeric id), and
+            'application_name'. Including 'sink' is required so we detect when
+            PipeWire/Pulse stream-restore or the default sink moves a matched
+            stream back off the rule target without changing application.name.
         """
         try:
             result = subprocess.run(
@@ -618,16 +629,22 @@ class DeviceMonitor:
                 return []
             
             streams = []
-            current_stream = {}
+            current_stream: Dict = {}
             
             for line in result.stdout.split('\n'):
                 line = line.strip()
                 
                 if line.startswith('Sink Input #'):
-                    if current_stream:
+                    if current_stream and 'application_name' in current_stream:
                         streams.append(current_stream)
                     current_stream = {'index': line.split('#')[1]}
-                elif 'application.name' in line and '=' in line:
+                elif current_stream and line.startswith('Sink:'):
+                    parts = line.split(':', 1)
+                    if len(parts) > 1:
+                        sink_part = parts[1].strip().split()
+                        if sink_part:
+                            current_stream['sink'] = sink_part[0]
+                elif current_stream and 'application.name' in line and '=' in line:
                     app_name = line.split('=')[1].strip().strip('"')
                     current_stream['application_name'] = app_name
             
@@ -648,16 +665,21 @@ class DeviceMonitor:
             current_streams: List of current audio streams
             
         Returns:
-            True if streams changed (new stream, removed stream, or app changed)
+            True if streams changed (new/removed stream, app name, or sink-input sink)
         """
         if len(current_streams) != len(self.last_streams):
             return True
         
-        # Compare stream application names
-        current_apps = sorted([s.get('application_name', '') for s in current_streams])
-        last_apps = sorted([s.get('application_name', '') for s in self.last_streams])
-        
-        return current_apps != last_apps
+        def stream_sig(s: Dict) -> tuple:
+            return (
+                s.get('index') or '',
+                s.get('application_name', ''),
+                s.get('sink') or '',
+            )
+
+        return sorted(stream_sig(s) for s in current_streams) != sorted(
+            stream_sig(s) for s in self.last_streams
+        )
 
     def _get_rule_target_device_ids(self, rules: List[Dict]) -> Set[str]:
         """Set of device ids that are targets of any rule (including variants)."""
@@ -741,20 +763,22 @@ class DeviceMonitor:
         return False
 
     def _stream_change_involves_rules(self, current_streams: List[Dict], rules_ref: List[Dict]) -> bool:
-        """True if the set of streams that match any rule has changed."""
+        """True if rule-matching streams changed (count, identity, or current sink)."""
         if not rules_ref:
             return True
-        current_matching = frozenset(
-            s.get('application_name') or ''
-            for s in current_streams
-            if any(self._app_matches_rule(s.get('application_name') or '', r) for r in rules_ref)
-        )
-        last_matching = frozenset(
-            s.get('application_name') or ''
-            for s in self.last_streams
-            if any(self._app_matches_rule(s.get('application_name') or '', r) for r in rules_ref)
-        )
-        return current_matching != last_matching
+
+        def matching_sigs(streams: List[Dict]) -> frozenset:
+            return frozenset(
+                (
+                    s.get('index') or '',
+                    s.get('application_name') or '',
+                    s.get('sink') or '',
+                )
+                for s in streams
+                if any(self._app_matches_rule(s.get('application_name') or '', r) for r in rules_ref)
+            )
+
+        return matching_sigs(current_streams) != matching_sigs(self.last_streams)
     
     def _is_significant_device_change(self, current_devices: List[Dict]) -> bool:
         """Check if device changes are significant enough to trigger config regeneration

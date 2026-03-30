@@ -19,6 +19,15 @@
   <url type="homepage">https://github.com/crashman79/sinkswitch</url>
   <url type="bugtracker">https://github.com/crashman79/sinkswitch/issues</url>
   <launchable type="desktop-id">io.github.crashman79.sinkswitch.desktop</launchable>
+  <branding>
+    <color type="primary" scheme_preference="light">#4caf50</color>
+  </branding>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/crashman79/sinkswitch/main/docs/flathub/main-window.png</image>
+      <caption>SinkSwitch main window</caption>
+    </screenshot>
+  </screenshots>
   <releases>
     <release version="0.7.18" date="2026-03-29"/>
   </releases>

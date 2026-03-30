@@ -22,9 +22,13 @@ The manifest uses **`--share=network`** during pip for local builds. **Flathub**
 
 ## Publishing to Flathub
 
-1. Add at least one **screenshot** to AppStream.
-2. Pin Python deps with checksums.
-3. Follow [Flathub submission](https://docs.flathub.org/docs/for-app-authors/submission/).
+See **[FLATHUB.md](./FLATHUB.md)** for the full checklist (screenshots, vendored Python wheels, PR flow). Summary:
+
+1. AppStream must include **screenshots** and a current **`<release>`** (see `io.github.crashman79.sinkswitch.metainfo.xml`).
+2. For the Flathub copy of the manifest, **pin Python deps** (no network at build time) using [flatpak-pip-generator](https://github.com/flathub/flatpak-builder-tools/tree/master/pip).
+3. Open a PR per [Flathub submission](https://docs.flathub.org/docs/for-app-authors/submission/).
+
+**Icons:** Canonical artwork lives in `data/icons/` (`io.github.crashman79.sinkswitch.svg` and `.png`); the Flatpak module installs them into `hicolor` (same as the PyInstaller bundle and in-app window/tray icon).
 
 ## Coexisting with other installs
 

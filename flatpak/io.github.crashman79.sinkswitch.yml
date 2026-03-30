@@ -86,7 +86,7 @@ modules:
       - pip3 install --verbose --exists-action=i --prefix=${FLATPAK_DEST} -r flatpak/python-requirements.txt
       - install -d ${FLATPAK_DEST}/lib/sinkswitch
       - cp -a run_app.py requirements.txt ${FLATPAK_DEST}/lib/sinkswitch/
-      - cp -a src ${FLATPAK_DEST}/lib/sinkswitch/
+      - cp -a src data ${FLATPAK_DEST}/lib/sinkswitch/
       - |
         VERSION=$(sed -n 's/.*<release version="\([^"]*\)"[^>]*>.*/\1/p' flatpak/io.github.crashman79.sinkswitch.metainfo.xml | head -1)
         if [ -z "${VERSION}" ]; then VERSION="0.0.0"; fi
@@ -94,7 +94,8 @@ modules:
       - install -Dm755 flatpak/entrypoint.sh ${FLATPAK_DEST}/bin/sinkswitch
       - install -Dm644 flatpak/io.github.crashman79.sinkswitch.desktop ${FLATPAK_DEST}/share/applications/io.github.crashman79.sinkswitch.desktop
       - install -Dm644 flatpak/io.github.crashman79.sinkswitch.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.crashman79.sinkswitch.metainfo.xml
-      - install -Dm644 flatpak/icons/hicolor/scalable/apps/io.github.crashman79.sinkswitch.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/io.github.crashman79.sinkswitch.svg
+      - install -Dm644 data/icons/io.github.crashman79.sinkswitch.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/io.github.crashman79.sinkswitch.svg
+      - install -Dm644 data/icons/io.github.crashman79.sinkswitch.png ${FLATPAK_DEST}/share/icons/hicolor/128x128/apps/io.github.crashman79.sinkswitch.png
     sources:
       - type: dir
         path: ..
