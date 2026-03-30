@@ -1,10 +1,13 @@
 # PyInstaller spec for SinkSwitch
-# Build: pyinstaller run_app.spec   (or ./build.sh)
+# Onefile:  pyinstaller run_app.spec   (or ./build.sh)
+# Onedir:   SINKSWITCH_ONEDIR=1 pyinstaller run_app.spec   (or ./build.sh --onedir)
 
+import os
 from pathlib import Path
 
 app_dir = Path(SPEC).resolve().parent
 src_dir = app_dir / 'src'
+onedir = os.environ.get("SINKSWITCH_ONEDIR", "").lower() in ("1", "true", "yes")
 
 # Ensure certifi's CA bundle is in the bundle (SSL verify in frozen app)
 _certifi_datas = []
@@ -18,6 +21,7 @@ a = Analysis(
     [str(app_dir / 'run_app.py')],
     pathex=[str(src_dir)],
     hiddenimports=[
+        'host_command',
         'audio_router_gui',
         'device_monitor',
         'config_parser',
@@ -35,25 +39,61 @@ a = Analysis(
     optimize=0,
 )
 
+# On Linux, PyInstaller pulls libxkbcommon from the PyQt wheel. Using that copy with the
+# system's X11 session and libQt6XcbQpa often crashes (SIGSEGV in xkb_state_* / Qt6XcbQpa).
+# Force the distro's libxkbcommon (matches compositor / keymaps / ABI).
+_libs_use_from_os = (
+    'libxkbcommon.so',
+    'libxkbcommon-x11.so',
+)
+a.binaries = [
+    t for t in a.binaries
+    if not t[0] or not any(s in t[0] for s in _libs_use_from_os)
+]
+
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
+_exe_kw = dict(
     name='sinkswitch',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,  # No terminal window on Linux
+    upx=not onedir,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
 )
+
+if onedir:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        upx_exclude=[],
+        **_exe_kw,
+    )
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        strip=False,
+        upx=True,
+        upx_exclude=[],
+        name='sinkswitch',
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        runtime_tmpdir=None,
+        upx_exclude=[],
+        **_exe_kw,
+    )

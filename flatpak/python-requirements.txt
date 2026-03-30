@@ -1,0 +1,4 @@
+# Flatpak pip step: dbus-python is unused in this repo and needs meson/mesonpy to build.
+PyYAML>=6.0
+certifi>=2023.0.0
+PyQt6>=6.0

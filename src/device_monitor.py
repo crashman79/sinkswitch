@@ -6,6 +6,7 @@ Device monitoring module for detecting and tracking audio output devices
 import logging
 import subprocess
 import json
+from host_command import host_cmd
 from collections import defaultdict
 from typing import Dict, List, Optional, Callable, Set, Tuple
 from dataclasses import dataclass
@@ -42,8 +43,8 @@ class DeviceMonitor:
     def _detect_audio_backend(self):
         """Detect which audio backend is available (PipeWire or PulseAudio)"""
         try:
-            subprocess.run(['pw-cli', 'info'], 
-                          capture_output=True, 
+            subprocess.run(host_cmd(['pw-cli', 'info']),
+                          capture_output=True,
                           check=False,
                           timeout=2)
             self.backend = 'pipewire'
@@ -63,7 +64,7 @@ class DeviceMonitor:
         """Return the current default sink name (where unmatched audio goes), or None."""
         try:
             r = subprocess.run(
-                ['pactl', 'get-default-sink'],
+                host_cmd(['pactl', 'get-default-sink']),
                 capture_output=True, text=True, timeout=2
             )
             if r.returncode == 0 and r.stdout.strip():
@@ -76,7 +77,7 @@ class DeviceMonitor:
         """Set the default sink (fallback for unmatched streams). Returns True on success."""
         try:
             r = subprocess.run(
-                ['pactl', 'set-default-sink', sink_name],
+                host_cmd(['pactl', 'set-default-sink', sink_name]),
                 capture_output=True, text=True, timeout=2
             )
             return r.returncode == 0
@@ -95,7 +96,7 @@ class DeviceMonitor:
         """
         try:
             result = subprocess.run(
-                ['pactl', 'list', 'cards'],
+                host_cmd(['pactl', 'list', 'cards']),
                 capture_output=True,
                 text=True,
                 timeout=5
@@ -157,7 +158,7 @@ class DeviceMonitor:
         """
         try:
             result = subprocess.run(
-                ['pactl', 'list', 'sinks', 'short'],
+                host_cmd(['pactl', 'list', 'sinks', 'short']),
                 capture_output=True,
                 text=True,
                 timeout=5
@@ -188,7 +189,7 @@ class DeviceMonitor:
         """
         try:
             result = subprocess.run(
-                ['pactl', 'set-card-profile', card_name, profile],
+                host_cmd(['pactl', 'set-card-profile', card_name, profile]),
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -284,7 +285,7 @@ class DeviceMonitor:
         try:
             # Use pactl as fallback since pw-cli output varies
             result = subprocess.run(
-                ['pactl', 'list', 'sinks'],
+                host_cmd(['pactl', 'list', 'sinks']),
                 capture_output=True,
                 text=True,
                 timeout=5
@@ -334,7 +335,7 @@ class DeviceMonitor:
         """Get devices using PulseAudio"""
         try:
             result = subprocess.run(
-                ['pactl', 'list', 'sinks'],
+                host_cmd(['pactl', 'list', 'sinks']),
                 capture_output=True,
                 text=True,
                 timeout=5
@@ -511,7 +512,7 @@ class DeviceMonitor:
         """Run watch loop driven by pactl subscribe events. Returns True if we ran to completion (or stop)."""
         try:
             proc = subprocess.Popen(
-                ['pactl', 'subscribe'],
+                host_cmd(['pactl', 'subscribe']),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
@@ -608,7 +609,7 @@ class DeviceMonitor:
         """
         try:
             result = subprocess.run(
-                ['pactl', 'list', 'sink-inputs'],
+                host_cmd(['pactl', 'list', 'sink-inputs']),
                 capture_output=True,
                 text=True,
                 check=False,
@@ -856,7 +857,7 @@ class DeviceMonitor:
         """
         try:
             result = subprocess.run(
-                ['pactl', 'list', 'source-outputs', 'short'],
+                host_cmd(['pactl', 'list', 'source-outputs', 'short']),
                 capture_output=True,
                 text=True,
                 timeout=5

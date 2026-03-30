@@ -108,6 +108,7 @@ except ImportError as e:
 # Import audio router modules
 sys.path.insert(0, str(Path(__file__).parent))
 try:
+    from host_command import host_cmd
     from device_monitor import DeviceMonitor
     from config_parser import ConfigParser
     from audio_router_engine import AudioRouterEngine
@@ -162,7 +163,7 @@ class StreamMonitorThread(QThread):
         """Get list of active audio streams (pactl: colon and key=value props)."""
         try:
             result = subprocess.run(
-                ['pactl', 'list', 'sink-inputs'],
+                host_cmd(['pactl', 'list', 'sink-inputs']),
                 capture_output=True, text=True, timeout=3
             )
             streams = []
@@ -1378,7 +1379,7 @@ class AudioRouterGUI(QMainWindow):
         out: Dict[str, str] = {}
         try:
             r = subprocess.run(
-                ['pactl', 'list', 'sinks', 'short'],
+                host_cmd(['pactl', 'list', 'sinks', 'short']),
                 capture_output=True, text=True, timeout=2
             )
             if r.returncode != 0:
@@ -1675,6 +1676,10 @@ class AudioRouterGUI(QMainWindow):
 def main():
     """Main entry point"""
     logger.info("Starting Audio Router GUI")
+    # PyInstaller bundles libxkbcommon; under XWayland/XCB it can segfault vs session keymaps.
+    # Prefer real Wayland QPA when available (fallback to xcb for pure X11).
+    if sys.platform.startswith("linux") and os.environ.get("WAYLAND_DISPLAY"):
+        os.environ.setdefault("QT_QPA_PLATFORM", "wayland;xcb")
     # After some Mesa/GPU updates Qt can crash during GL init; optional software GL for the UI only.
     if os.environ.get("SINKSWITCH_USE_SOFTWARE_OPENGL", "").lower() in ("1", "true", "yes", "on"):
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL, True)
