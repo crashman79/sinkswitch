@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build a standalone binary with PyInstaller.
+# Optional local dev: PyInstaller onefile/onedir (not published on GitHub Releases; use Flatpak there).
 # Uses a project venv so no system pip/pyinstaller needed (works on Arch etc.).
 # Output: dist/sinkswitch (onefile) or dist/sinkswitch/ (folder; ./build.sh --onedir)
 

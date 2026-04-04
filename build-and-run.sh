@@ -1,5 +1,6 @@
 #!/bin/sh
-# Build the SinkSwitch binary (optional: wipe PyInstaller output first) and run dist/sinkswitch.
+# Local dev: rebuild PyInstaller binary (optional clean) and run dist/sinkswitch.
+# Releases use Flatpak; see .github/workflows/release.yml and flatpak/README.md.
 #
 #   ./build-and-run.sh                 # incremental build, then run
 #   ./build-and-run.sh --clean         # rm build/ + dist/, then build, then run

@@ -58,7 +58,11 @@ def _acquire_single_instance_lock() -> bool:
 
 def _config_base() -> Path:
     p = os.environ.get("AUDIO_ROUTER_CONFIG")
-    return Path(p) if p else Path.home() / ".config" / "sinkswitch"
+    if p:
+        return Path(p)
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else (Path.home() / ".config")
+    return base / "sinkswitch"
 
 
 def _brand_icon_path() -> Optional[Path]:
@@ -84,6 +88,24 @@ def _brand_icon_path() -> Optional[Path]:
             if p.is_file():
                 return p
     return None
+
+
+def _desktop_icon_name() -> str:
+    """Icon= for generated .desktop files; Flatpak installs hicolor icons under this name."""
+    return "audio-card"
+
+
+def _app_icon():
+    """Return the icon used for window + tray + desktop launchers."""
+    try:
+        from PyQt6.QtGui import QIcon
+        ic = QIcon.fromTheme("audio-card")
+        if not ic.isNull():
+            return ic
+        bp = _brand_icon_path()
+        return QIcon(str(bp)) if bp else QIcon()
+    except Exception:
+        return None
 
 
 # In-memory log capture for standalone (no journal)
@@ -123,8 +145,8 @@ try:
         QHeaderView, QMessageBox, QFileDialog, QComboBox, QLineEdit,
         QDialog, QDialogButtonBox, QCheckBox, QScrollArea, QRadioButton, QButtonGroup
     )
-    from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QAction, QPalette
-    from PyQt6.QtCore import QTimer, Qt, QSize, pyqtSignal, QThread
+    from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QAction, QPalette, QImage
+    from PyQt6.QtCore import QTimer, Qt, QSize, QMargins, pyqtSignal, QThread, QSettings
     from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
 except ImportError as e:
     logger.error(f"PyQt6 not available: {e}")
@@ -134,11 +156,12 @@ except ImportError as e:
 # Import audio router modules
 sys.path.insert(0, str(Path(__file__).parent))
 try:
-    from host_command import host_cmd
+    from host_command import host_cmd, SUBPROCESS_TEXT_KW
     from device_monitor import DeviceMonitor
     from config_parser import ConfigParser
     from audio_router_engine import AudioRouterEngine
     from intelligent_audio_router import IntelligentAudioRouter
+    from portal_background import request_flatpak_login_autostart
 except ImportError as e:
     logger.error(f"Failed to import audio router modules: {e}")
     sys.exit(1)
@@ -190,7 +213,7 @@ class StreamMonitorThread(QThread):
         try:
             result = subprocess.run(
                 host_cmd(['pactl', 'list', 'sink-inputs']),
-                capture_output=True, text=True, timeout=3
+                capture_output=True, text=True, timeout=3, **SUBPROCESS_TEXT_KW
             )
             streams = []
             current_stream = {}
@@ -413,21 +436,68 @@ def _app_settings_path() -> Path:
 
 
 def _load_app_settings() -> Dict[str, Any]:
-    path = _app_settings_path()
-    if not path.exists():
-        return {}
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    # Flatpak-friendly: QSettings stores under XDG config automatically
+    # (inside ~/.var/app/<app-id>/config when sandboxed).
+    pref_types: Dict[str, Any] = {
+        "login_autostart": bool,
+        "start_minimized_at_login": bool,
+        "start_routing_on_launch": bool,
+        "close_to_tray": bool,
+        "theme": str,
+    }
+    s = QSettings("io.github.crashman79", "sinkswitch")
+    out: Dict[str, Any] = {}
+    s.beginGroup("prefs")
+    for k, t in pref_types.items():
+        try:
+            if t is bool:
+                v = s.value(k, None, type=bool)
+            elif t is int:
+                v = s.value(k, None, type=int)
+            else:
+                v = s.value(k, None)
+            if v is not None:
+                out[k] = v
+        except Exception:
+            pass
+    s.endGroup()
+
+    # One-time migration from legacy JSON file (standalone model).
+    legacy = _app_settings_path()
+    if legacy.exists():
+        try:
+            data = json.loads(legacy.read_text())
+            migrated = False
+            s.beginGroup("prefs")
+            for k in pref_types.keys():
+                if k in data and k not in out:
+                    s.setValue(k, data[k])
+                    out[k] = data[k]
+                    migrated = True
+            s.endGroup()
+            if migrated:
+                s.sync()
+        except Exception:
+            pass
+
+    return out
 
 
 def _save_app_settings(data: Dict[str, Any]) -> None:
-    path = _app_settings_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, 'w') as f:
-        json.dump(data, f, indent=2)
+    pref_keys = {
+        "login_autostart",
+        "start_minimized_at_login",
+        "start_routing_on_launch",
+        "close_to_tray",
+        "theme",
+    }
+    s = QSettings("io.github.crashman79", "sinkswitch")
+    s.beginGroup("prefs")
+    for k in pref_keys:
+        if k in data:
+            s.setValue(k, data[k])
+    s.endGroup()
+    s.sync()
 
 
 def _apply_theme(app: "QApplication", theme: str) -> None:
@@ -451,6 +521,8 @@ def _apply_theme(app: "QApplication", theme: str) -> None:
             palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
             palette.setColor(QPalette.ColorRole.Link, QColor(42, 130, 218))
             palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(127, 127, 127))
+            palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(50, 50, 50))
+            palette.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
         else:  # light
             palette.setColor(QPalette.ColorRole.Window, Qt.GlobalColor.white)
             palette.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.black)
@@ -463,40 +535,11 @@ def _apply_theme(app: "QApplication", theme: str) -> None:
             palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.white)
             palette.setColor(QPalette.ColorRole.Link, QColor(0, 0, 255))
             palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(127, 127, 127))
+            palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(255, 255, 220))
+            palette.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.black)
         app.setPalette(palette)
     except Exception as e:
         logger.warning("Failed to apply theme %s: %s", theme, e)
-
-
-def _applications_dir() -> Path:
-    """User application menu directory (~/.local/share/applications)."""
-    return Path.home() / ".local" / "share" / "applications"
-
-
-def _get_installable_binary_path() -> Optional[Path]:
-    """Path to the running binary when built as standalone (frozen). None when running from source or not a single file."""
-    launch = os.environ.get("AUDIO_ROUTER_LAUNCH_CMD", "").strip()
-    if not launch or " " in launch:
-        return None
-    p = Path(launch).resolve()
-    return p if p.is_file() and os.access(p, os.X_OK) else None
-
-
-def _install_binary_to_local_bin() -> tuple:
-    """Copy the current binary to ~/.local/bin/sinkswitch. Returns (success, message)."""
-    src = _get_installable_binary_path()
-    if not src:
-        return False, "Only available when running the built binary (e.g. ./dist/sinkswitch)."
-    dest_dir = Path.home() / ".local" / "bin"
-    dest = dest_dir / "sinkswitch"
-    try:
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
-        dest.chmod(0o755)
-        return True, f"Installed to {dest}\n\nIf ~/.local/bin is on your PATH, you can run 'sinkswitch' from anywhere."
-    except Exception as e:
-        logger.exception("Install to ~/.local/bin failed")
-        return False, str(e)
 
 
 def _version_tuple(version_str: str) -> Tuple[int, ...]:
@@ -531,7 +574,7 @@ def _update_ssl_context() -> ssl.SSLContext:
 
 def _update_check() -> Tuple[bool, str, Optional[str], Optional[str]]:
     """Check for updates. Returns (ok, message, latest_tag, download_url). Only for frozen builds."""
-    if not _get_installable_binary_path():
+    if not getattr(sys, "frozen", False):
         return False, "Update check is only available when running the built binary.", None, None
     try:
         req = urllib.request.Request(GITHUB_RELEASES_API, headers={"Accept": "application/vnd.github.v3+json"})
@@ -596,9 +639,9 @@ def _update_restart_to_apply() -> Tuple[bool, str]:
     """Spawn an updater script and exit; script waits for us to exit, replaces binary, then launches. Returns (True, '') if we're about to exit."""
     if not UPDATES_NEW_BINARY.exists():
         return False, "No downloaded update found."
-    current = _get_installable_binary_path()
-    if not current:
+    if not getattr(sys, "frozen", False):
         return False, "Restart is only available when running the built binary."
+    current = Path(sys.executable).resolve()
     path_new = UPDATES_NEW_BINARY.resolve()
     path_current = current.resolve()
     try:
@@ -624,78 +667,68 @@ def _update_restart_to_apply() -> Tuple[bool, str]:
     return True, ""
 
 
-def _get_launch_cmd_for_desktop() -> str:
-    """Preferred Exec= for desktop/autostart.
-
-    Menu launchers do not set cwd to the repo; ``python3 -m run_app`` only works when the cwd is the repo root,
-    so from a shortcut it fails while the same command in a terminal appears fine.
-    """
-    local_bin = Path.home() / ".local" / "bin" / "sinkswitch"
-    if local_bin.is_file() and os.access(local_bin, os.X_OK):
-        return shlex.quote(str(local_bin))
-    env_cmd = os.environ.get("AUDIO_ROUTER_LAUNCH_CMD", "").strip()
-    if env_cmd:
-        return env_cmd
-    run_app = Path(__file__).resolve().parent.parent / "run_app.py"
-    if run_app.is_file():
-        return shlex.join([sys.executable, str(run_app)])
-    return shlex.join([sys.executable, "-m", "run_app"])
+def _native_login_autostart_desktop_path() -> Path:
+    return Path.home() / ".config/autostart" / "io.github.crashman79.sinkswitch.desktop"
 
 
-def _create_app_menu_shortcut() -> Optional[Path]:
-    """Add a .desktop entry to the application menu. Returns path or None on failure."""
-    app_dir = _applications_dir()
-    app_dir.mkdir(parents=True, exist_ok=True)
-    path = app_dir / "sinkswitch.desktop"
-    exec_cmd = _get_launch_cmd_for_desktop()
-    # No Path=: Exec uses absolute paths to python + run_app.py (or ~/.local/bin/sinkswitch).
+def _is_pyinstaller_bundle() -> bool:
+    return bool(getattr(sys, "frozen", False) or getattr(sys, "_MEIPASS", None))
+
+
+def _native_autostart_argv(start_minimized: bool) -> Optional[List[str]]:
+    """Command argv for XDG autostart Exec= (binary when frozen, else python + run_app.py)."""
+    extra = ["--minimized"] if start_minimized else []
+    if _is_pyinstaller_bundle():
+        return [str(Path(sys.executable).resolve())] + extra
+    wd = os.environ.get("AUDIO_ROUTER_WORKING_DIR", "").strip()
+    if wd:
+        run_app = Path(wd) / "run_app.py"
+        if run_app.is_file():
+            return [sys.executable, str(run_app.resolve())] + extra
+    for base in Path(__file__).resolve().parents:
+        cand = base / "run_app.py"
+        if cand.is_file():
+            return [sys.executable, str(cand.resolve())] + extra
+    cwd_run = Path.cwd() / "run_app.py"
+    if cwd_run.is_file():
+        return [sys.executable, str(cwd_run.resolve())] + extra
+    return None
+
+
+def _apply_native_login_autostart(enable: bool, start_minimized: bool) -> Tuple[bool, str]:
+    """Non-Flatpak: write or remove ~/.config/autostart/*.desktop."""
+    path = _native_login_autostart_desktop_path()
+    if not enable:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            return False, str(e)
+        return True, "Login autostart disabled."
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = _native_autostart_argv(start_minimized)
+    if not cmd:
+        return (
+            False,
+            "Cannot locate the app for autostart (PyInstaller binary or run_app.py). "
+            "Use the Flatpak build for login autostart, or run from a repo checkout.",
+        )
+    exec_line = shlex.join(cmd)
     content = f"""[Desktop Entry]
 Type=Application
 Name=SinkSwitch
-Comment=Automatic audio routing for PipeWire/PulseAudio
-Exec={exec_cmd}
-Icon=audio-card
-Terminal=false
-Categories=AudioVideo;Audio;Settings;
-Keywords=audio;routing;pipewire;pulseaudio;
-StartupNotify=true
-"""
-    try:
-        path.write_text(content)
-        path.chmod(0o644)
-        return path
-    except Exception as e:
-        logger.error("Failed to create application menu shortcut: %s", e)
-        return None
-
-
-def _autostart_desktop_path() -> Path:
-    return Path.home() / '.config/autostart/sinkswitch.desktop'
-
-
-def _is_autostart_enabled() -> bool:
-    return _autostart_desktop_path().exists()
-
-
-def _set_autostart_enabled(enabled: bool, exec_cmd: str, start_minimized: bool = False) -> None:
-    path = _autostart_desktop_path()
-    if enabled:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if start_minimized:
-            exec_cmd = f"{exec_cmd} --minimized"
-        content = f"""[Desktop Entry]
-Type=Application
-Name=SinkSwitch
-Comment=Automatic audio routing (launched at login)
-Exec={exec_cmd}
+Comment=Automatic audio routing (start at login)
+Exec={exec_line}
 Icon=audio-card
 Terminal=false
 Categories=AudioVideo;Audio;
 X-GNOME-Autostart-enabled=true
 """
+    try:
         path.write_text(content)
-    elif path.exists():
-        path.unlink()
+        path.chmod(0o644)
+    except OSError as e:
+        return False, str(e)
+    return True, "Login autostart enabled (XDG autostart file)."
 
 
 class AudioRouterGUI(QMainWindow):
@@ -721,60 +754,26 @@ class AudioRouterGUI(QMainWindow):
                 self.config_file.write_text('routing_rules: []\n')
 
         settings = _load_app_settings()
-        self.start_on_login = settings.get('start_on_login', 'none')
+        self.login_autostart = settings.get("login_autostart", False)
+        self.start_minimized_at_login = settings.get("start_minimized_at_login", False)
+        self._portal_login_snapshot = (self.login_autostart, self.start_minimized_at_login)
         self.start_routing_on_launch = settings.get('start_routing_on_launch', True)
         self.close_to_tray = settings.get('close_to_tray', False)
-        self.start_minimized = settings.get('start_minimized', False)
-        self.offer_install_to_bin = settings.get('offer_install_to_bin', True)
         self.theme_setting = settings.get('theme', 'system')
         self.monitor_thread: Optional[MonitorThread] = None
         self.device_thread = None
         self.stream_thread = None
 
         self.init_ui()
-        _bp = _brand_icon_path()
-        if _bp:
-            self.setWindowIcon(QIcon(str(_bp)))
+        ic = _app_icon()
+        if not ic.isNull():
+            self.setWindowIcon(ic)
         self._setup_tray()
         self.load_config()
         self.start_background_updates()
         self.update_service_status()
         if self.start_routing_on_launch and self.config_file.exists():
             self._start_in_app_monitor()
-        QTimer.singleShot(500, self._maybe_offer_install_to_bin)
-
-    def _maybe_offer_install_to_bin(self):
-        """Once per install: offer to copy binary to ~/.local/bin if not already there."""
-        if not self.offer_install_to_bin:
-            return
-        src = _get_installable_binary_path()
-        if not src:
-            return
-        local_bin = Path.home() / ".local" / "bin" / "sinkswitch"
-        if src.resolve() == local_bin.resolve():
-            return
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Install SinkSwitch")
-        msg.setText("Copy SinkSwitch to ~/.local/bin so you can run it from anywhere?")
-        msg.setInformativeText("If ~/.local/bin is on your PATH, you can run 'sinkswitch' from the terminal or app launcher.")
-        copy_btn = msg.addButton("Copy to ~/.local/bin", QMessageBox.ButtonRole.AcceptRole)
-        later_btn = msg.addButton("Later", QMessageBox.ButtonRole.RejectRole)
-        dont_btn = msg.addButton("Don't ask again", QMessageBox.ButtonRole.ActionRole)
-        msg.setDefaultButton(copy_btn)
-        msg.exec()
-        clicked = msg.clickedButton()
-        if clicked == dont_btn:
-            self.offer_install_to_bin = False
-            _save_app_settings({**_load_app_settings(), 'offer_install_to_bin': False})
-        elif clicked == copy_btn:
-            ok, text = _install_binary_to_local_bin()
-            self.offer_install_to_bin = False
-            _save_app_settings({**_load_app_settings(), 'offer_install_to_bin': False})
-            if ok:
-                QMessageBox.information(self, "Installed", text)
-                self.statusBar().showMessage("Binary installed to ~/.local/bin/sinkswitch", 5000)
-            else:
-                QMessageBox.warning(self, "Install failed", text)
 
     def _setup_tray(self):
         """Create system tray icon if available."""
@@ -811,11 +810,54 @@ class AudioRouterGUI(QMainWindow):
         self.tray_stop_act.setEnabled(running)
 
     def _tray_icon_pixmap(self) -> QIcon:
-        bp = _brand_icon_path()
-        if bp:
-            ic = QIcon(str(bp))
+        def _avg_luma(pm: QPixmap) -> float:
+            """Return average luminance (0..255) of non-transparent pixels."""
+            img = pm.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+            w = img.width()
+            h = img.height()
+            if w <= 0 or h <= 0:
+                return 255.0
+            total = 0.0
+            n = 0
+            for y in range(h):
+                for x in range(w):
+                    c = img.pixelColor(x, y)
+                    a = c.alpha()
+                    if a < 10:
+                        continue
+                    # Rec. 709 luma
+                    total += 0.2126 * c.red() + 0.7152 * c.green() + 0.0722 * c.blue()
+                    n += 1
+            return (total / n) if n else 255.0
+
+        def _recolor_to_white(pm: QPixmap) -> QPixmap:
+            """Recolor pixmap to solid white, preserving alpha."""
+            img = pm.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+            out = QImage(img.size(), QImage.Format.Format_ARGB32)
+            out.fill(Qt.GlobalColor.transparent)
+            p = QPainter(out)
+            p.drawImage(0, 0, img)
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+            p.fillRect(out.rect(), Qt.GlobalColor.white)
+            p.end()
+            return QPixmap.fromImage(out)
+
+        # Tray icons are typically rendered on dark/light panels; prefer a symbolic
+        # theme icon if available so the DE can pick appropriate colors.
+        ic = QIcon.fromTheme("audio-card-symbolic")
+        if not ic.isNull():
             pm = ic.pixmap(QSize(22, 22))
             if not pm.isNull():
+                # Some DEs/themes don't recolor symbolic icons in the tray; ensure contrast.
+                if _avg_luma(pm) < 80:
+                    pm = _recolor_to_white(pm)
+                return QIcon(pm)
+        ic = _app_icon()
+        if ic is not None and not ic.isNull():
+            pm = ic.pixmap(QSize(22, 22))
+            if not pm.isNull():
+                if _avg_luma(pm) < 80:
+                    pm = _recolor_to_white(pm)
                 return QIcon(pm)
         size = QSize(22, 22)
         pixmap = QPixmap(size)
@@ -862,7 +904,17 @@ class AudioRouterGUI(QMainWindow):
         """Initialize the user interface"""
         self.setWindowTitle("SinkSwitch")
         self.setMinimumSize(300, 300)
-        self.resize(1000, 620)
+        app_inst = QApplication.instance()
+        screen = app_inst.primaryScreen() if app_inst else None
+        if screen:
+            ag = screen.availableGeometry()
+            pad = 40
+            self.resize(
+                min(1000, max(self.minimumWidth(), ag.width() - pad)),
+                min(620, max(self.minimumHeight(), ag.height() - pad)),
+            )
+        else:
+            self.resize(1000, 620)
         
         # Central widget
         central_widget = QWidget()
@@ -870,6 +922,7 @@ class AudioRouterGUI(QMainWindow):
         
         # Main layout
         main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(QMargins(10, 8, 10, 8))
         central_widget.setLayout(main_layout)
         
         # Top toolbar
@@ -885,7 +938,10 @@ class AudioRouterGUI(QMainWindow):
         # Default (fallback) output: where unmatched audio goes
         toolbar_layout.addWidget(QLabel("Default output:"))
         self.default_sink_combo = QComboBox()
-        self.default_sink_combo.setMinimumWidth(60)
+        self.default_sink_combo.setMinimumWidth(220)
+        self.default_sink_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
         self.default_sink_combo.setToolTip("Sink used for apps that don't match any rule. New streams go here.")
         self.default_sink_combo.currentIndexChanged.connect(self._on_default_sink_changed)
         toolbar_layout.addWidget(self.default_sink_combo)
@@ -930,6 +986,17 @@ class AudioRouterGUI(QMainWindow):
         # Tab 6: About
         about_tab = self.create_about_tab()
         tabs.addTab(about_tab, "ℹ️ About")
+
+        _tab_tips = [
+            "Sinks PipeWire/Pulse sees (Bluetooth, USB, built-in, HDMI)",
+            "Per-app rules: which programs go to which output",
+            "Live playback streams and which rule applies",
+            "In-app log buffer for troubleshooting",
+            "Autostart, theme, tray, and optional binary install",
+            "Version, config paths, and updates",
+        ]
+        for i, tip in enumerate(_tab_tips):
+            tabs.setTabToolTip(i, tip)
 
         # Status bar
         self.statusBar().showMessage("Ready")
@@ -1059,30 +1126,33 @@ class AudioRouterGUI(QMainWindow):
         return widget
 
     def create_settings_tab(self) -> QWidget:
-        """Create the Settings tab (start on login, auto-start routing)."""
+        """Create the Settings tab (Flatpak-focused)."""
         widget = QWidget()
         main_layout = QHBoxLayout()
         widget.setLayout(main_layout)
 
         left_col = QVBoxLayout()
-        login_group = QGroupBox("Start on login (Linux desktop)")
-        login_layout = QVBoxLayout()
-        self.login_none_radio = QRadioButton("None – start manually")
-        self.login_xdg_radio = QRadioButton("Launch app at login – XDG Autostart (~/.config/autostart); works on GNOME, KDE, XFCE, MATE, etc.")
-        self.login_none_radio.setChecked(self.start_on_login == 'none')
-        self.login_xdg_radio.setChecked(self.start_on_login == 'xdg')
-        login_layout.addWidget(self.login_none_radio)
-        login_layout.addWidget(self.login_xdg_radio)
-        self.start_minimized_check = QCheckBox("Start minimized when launched at login")
-        self.start_minimized_check.setChecked(self.start_minimized)
-        self.start_minimized_check.setToolTip("When enabled, the window stays hidden (tray only) or minimized when the app is started at login.")
-        login_layout.addWidget(self.start_minimized_check)
-        login_group.setLayout(login_layout)
-        left_col.addWidget(login_group)
-
+        startup_group = QGroupBox("Startup")
+        startup_layout = QVBoxLayout()
+        hint = QLabel(
+            "Flatpak: login autostart uses the desktop portal (system dialog). "
+            "From a git checkout, an XDG autostart file is written instead."
+        )
+        hint.setWordWrap(True)
+        startup_layout.addWidget(hint)
+        self.login_autostart_check = QCheckBox("Start SinkSwitch when I log in")
+        self.login_autostart_check.setChecked(self.login_autostart)
+        startup_layout.addWidget(self.login_autostart_check)
+        self.start_minimized_at_login_check = QCheckBox("Start minimized (tray only when possible)")
+        self.start_minimized_at_login_check.setChecked(self.start_minimized_at_login)
+        self.start_minimized_at_login_check.setEnabled(self.login_autostart)
+        self.login_autostart_check.toggled.connect(self.start_minimized_at_login_check.setEnabled)
+        startup_layout.addWidget(self.start_minimized_at_login_check)
         self.start_routing_check = QCheckBox("Start routing automatically when app opens")
         self.start_routing_check.setChecked(self.start_routing_on_launch)
-        left_col.addWidget(self.start_routing_check)
+        startup_layout.addWidget(self.start_routing_check)
+        startup_group.setLayout(startup_layout)
+        left_col.addWidget(startup_group)
 
         theme_group = QGroupBox("Appearance")
         theme_layout = QVBoxLayout()
@@ -1104,25 +1174,7 @@ class AudioRouterGUI(QMainWindow):
         main_layout.addLayout(left_col)
 
         right_col = QVBoxLayout()
-        install_group = QGroupBox("Install binary to a standard location")
-        install_layout = QVBoxLayout()
-        install_layout.addWidget(QLabel("Copy the app binary to ~/.local/bin so you can run 'sinkswitch' from anywhere (if that directory is on your PATH). Overwrites existing file if present."))
-        self.install_bin_btn = QPushButton("Copy to ~/.local/bin")
-        self.install_bin_btn.setMaximumWidth(180)
-        self.install_bin_btn.setToolTip("Only available when running the built binary. Overwrites ~/.local/bin/sinkswitch if it already exists.")
-        self.install_bin_btn.clicked.connect(self._on_install_to_local_bin)
-        if not _get_installable_binary_path():
-            self.install_bin_btn.setEnabled(False)
-        install_layout.addWidget(self.install_bin_btn)
-        install_group.setLayout(install_layout)
-        right_col.addWidget(install_group)
-
         btn_row = QHBoxLayout()
-        shortcut_btn = QPushButton("Add to application menu")
-        shortcut_btn.setMaximumWidth(220)
-        shortcut_btn.setToolTip("Adds or updates a launcher in your application menu. Overwrites the existing launcher if present.")
-        shortcut_btn.clicked.connect(self._on_create_app_menu_shortcut)
-        btn_row.addWidget(shortcut_btn)
         apply_btn = QPushButton("Apply and save")
         apply_btn.setMaximumWidth(140)
         apply_btn.clicked.connect(self.apply_settings)
@@ -1176,7 +1228,7 @@ class AudioRouterGUI(QMainWindow):
         _wrap_rich("<b>Technology</b>")
         _wrap_plain("• Python 3, PyQt6 (GUI)")
         _wrap_plain("• PipeWire / PulseAudio (pactl)")
-        _wrap_plain("• YAML config, XDG autostart")
+        _wrap_plain("• YAML config; Flatpak login autostart uses the desktop portal")
         sl.addSpacing(8)
         _wrap_rich("<b>Config and routing rules</b>")
         _wrap_plain(
@@ -1279,63 +1331,68 @@ class AudioRouterGUI(QMainWindow):
             QMessageBox.warning(self, "Restart failed", err)
         # else: we exec and exit
 
-    def _on_install_to_local_bin(self):
-        ok, msg = _install_binary_to_local_bin()
-        if ok:
-            QMessageBox.information(self, "Installed", msg)
-            self.statusBar().showMessage("Binary installed to ~/.local/bin/sinkswitch", 5000)
-        else:
-            QMessageBox.warning(self, "Install failed", msg)
-
-    def _on_create_app_menu_shortcut(self):
-        p = _create_app_menu_shortcut()
-        if p:
-            QMessageBox.information(
-                self,
-                "Added to application menu",
-                "SinkSwitch has been added to your application menu.\n\nYou can launch it from your app launcher (e.g. Activities, application grid) without using a terminal."
-            )
-            self.statusBar().showMessage("Added to application menu", 3000)
-        else:
-            QMessageBox.warning(
-                self,
-                "Could not add to menu",
-                "Failed to write the menu shortcut. Check that ~/.local/share/applications is writable."
-            )
-
     def apply_settings(self):
-        """Save settings and apply autostart."""
-        start_on_login = 'xdg' if self.login_xdg_radio.isChecked() else 'none'
+        """Save settings; apply login autostart via portal (Flatpak) or XDG file (dev)."""
+        login_autostart = self.login_autostart_check.isChecked()
+        start_minimized_at_login = self.start_minimized_at_login_check.isChecked()
         start_routing = self.start_routing_check.isChecked()
         close_to_tray = self.close_to_tray_check.isChecked()
-        start_minimized = self.start_minimized_check.isChecked()
         theme_map = {0: "system", 1: "light", 2: "dark"}
         theme = theme_map.get(self.theme_combo.currentIndex(), "system")
-        self.start_on_login = start_on_login
+        self.login_autostart = login_autostart
+        self.start_minimized_at_login = start_minimized_at_login
         self.start_routing_on_launch = start_routing
         self.close_to_tray = close_to_tray
-        self.start_minimized = start_minimized
         self.theme_setting = theme
         _save_app_settings({
             **_load_app_settings(),
-            'start_on_login': start_on_login,
+            "login_autostart": login_autostart,
+            "start_minimized_at_login": start_minimized_at_login,
             'start_routing_on_launch': start_routing,
             'close_to_tray': close_to_tray,
-            'start_minimized': start_minimized,
             'theme': theme,
-            'offer_install_to_bin': getattr(self, 'offer_install_to_bin', True),
         })
         # Defer palette apply to next event loop to avoid re-entrancy crash in Qt
         app = QApplication.instance()
         if app:
             QTimer.singleShot(0, lambda: _apply_theme(app, theme))
-        exec_cmd = _get_launch_cmd_for_desktop()
-        if start_on_login == 'xdg':
-            _set_autostart_enabled(True, exec_cmd, start_minimized=start_minimized)
-        else:
-            _set_autostart_enabled(False, exec_cmd)
         self.update_service_status()
-        self.statusBar().showMessage("Settings saved", 2000)
+
+        pair = (login_autostart, start_minimized_at_login)
+        if os.environ.get("FLATPAK_ID"):
+            if pair != self._portal_login_snapshot:
+                self.statusBar().showMessage("Complete the system dialog for login autostart…", 6000)
+
+                def _on_portal_done(ok: bool, msg: str) -> None:
+                    if ok:
+                        self._portal_login_snapshot = pair
+                        self.statusBar().showMessage(msg, 8000)
+                    else:
+                        self.login_autostart_check.setChecked(self._portal_login_snapshot[0])
+                        self.start_minimized_at_login_check.setChecked(self._portal_login_snapshot[1])
+                        self.login_autostart = self._portal_login_snapshot[0]
+                        self.start_minimized_at_login = self._portal_login_snapshot[1]
+                        _save_app_settings({
+                            **_load_app_settings(),
+                            "login_autostart": self._portal_login_snapshot[0],
+                            "start_minimized_at_login": self._portal_login_snapshot[1],
+                            "start_routing_on_launch": self.start_routing_on_launch,
+                            "close_to_tray": self.close_to_tray,
+                            "theme": self.theme_setting,
+                        })
+                        QMessageBox.warning(self, "Login autostart", msg)
+                        self.statusBar().showMessage("Login autostart unchanged", 4000)
+
+                request_flatpak_login_autostart(self, login_autostart, start_minimized_at_login, _on_portal_done)
+            else:
+                self.statusBar().showMessage("Settings saved", 2000)
+        else:
+            ok, msg = _apply_native_login_autostart(login_autostart, start_minimized_at_login)
+            if ok:
+                self._portal_login_snapshot = pair
+                self.statusBar().showMessage(msg, 5000)
+            else:
+                QMessageBox.warning(self, "Login autostart", msg)
 
     def start_background_updates(self):
         """Start background update threads"""
@@ -1415,7 +1472,7 @@ class AudioRouterGUI(QMainWindow):
         try:
             r = subprocess.run(
                 host_cmd(['pactl', 'list', 'sinks', 'short']),
-                capture_output=True, text=True, timeout=2
+                capture_output=True, text=True, timeout=2, **SUBPROCESS_TEXT_KW
             )
             if r.returncode != 0:
                 return out
@@ -1721,9 +1778,9 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("SinkSwitch")
-    _app_icon = _brand_icon_path()
-    if _app_icon:
-        app.setWindowIcon(QIcon(str(_app_icon)))
+    ic = _app_icon()
+    if not ic.isNull():
+        app.setWindowIcon(ic)
     # Don't quit when window is closed; we hide to tray or quit explicitly
     app.setQuitOnLastWindowClosed(False)
     # Apply saved theme so restart-after-update uses user choice (env whitelist may drop DE theme vars)

@@ -12,22 +12,24 @@ Route application audio to different outputs (Bluetooth, USB, HDMI, etc.) by rul
 
 ## Install and run
 
-### Option A: GitHub release (single-file binary)
+### Option A: GitHub release (Flatpak)
 
-1. **Download** the Linux binary from [Releases](https://github.com/crashman79/sinkswitch/releases).
-2. **Run** it (e.g. `chmod +x sinkswitch && ./sinkswitch`).
+From [Releases](https://github.com/crashman79/sinkswitch/releases), download **`sinkswitch-<version>-x86_64.flatpak`**, then:
 
-### Option B: Flatpak (build locally)
+```bash
+flatpak install --user ./sinkswitch-<version>-x86_64.flatpak
+flatpak run io.github.crashman79.sinkswitch
+```
 
-Uses your system PipeWire/Pulse tools on the host while bundling the GUI. See **[flatpak/README.md](flatpak/README.md)**.
+### Option B: Flatpak (build from source)
 
-After `flatpak-builder --install`, run `flatpak run io.github.crashman79.sinkswitch`.
+See **[flatpak/README.md](flatpak/README.md)**. After `flatpak-builder --install`, run `flatpak run io.github.crashman79.sinkswitch`.
 
 ### Option C: From source or venv
 
 See **Run from source** below or `packaging/install-user-venv.sh`.
 
-On first run the app creates config at `~/.config/sinkswitch/`. Use the GUI to add routing rules and start the router. **Settings** → Add to application menu or launch at login if you like.
+On first run the app creates config at `~/.config/sinkswitch/`. Use the GUI to add routing rules and start the router.
 
 ## Run from source
 
@@ -38,23 +40,25 @@ python3 run_app.py
 
 Same config and behavior; config dir is `~/.config/sinkswitch/` (or set `AUDIO_ROUTER_CONFIG`).
 
-### Build the binary yourself
+### Optional: local PyInstaller binary (development)
+
+Releases ship **Flatpak only**. To build a standalone binary on your machine (debugging, etc.):
 
 ```bash
 ./build.sh
 ./dist/sinkswitch
 ```
 
-For a **portable directory** build (same PyInstaller bundle as releases, easier to debug than a single file): `./build.sh --onedir` then run `./dist/sinkswitch/sinkswitch`. For maximum stability on your distro, use **from source** or the venv installer in `packaging/install-user-venv.sh` (see `packaging/README.md`).
+**Onedir:** `./build.sh --onedir` → `./dist/sinkswitch/sinkswitch`. See `packaging/README.md`. For day-to-day use, prefer **Flatpak** or **source/venv**.
 
 ### Releasing a new version
 
-Version comes from the **git tag** at build time. The GitHub Action builds the binary and creates the release when you push a tag.
+Pushing a tag `v*` runs **Flatpak release**: builds `sinkswitch-<version>-x86_64.flatpak` and creates the GitHub release with that artifact.
 
-1. Tag and push: `git tag v0.7.11 && git push origin v0.7.11`
-2. The workflow builds the binary with that version and creates the GitHub release with the asset.
+1. Bump **`src/_version.py`** and **`flatpak/...metainfo.xml`** `<release>` (or let CI rewrite metainfo + `_version.py` from the tag during the workflow).
+2. `git tag v0.7.19 && git push origin v0.7.19`
 
-For a **local** build, run `./build.sh` — it sets the version from the current repo tag.
+Run **Flatpak release** manually from the Actions tab (**workflow_dispatch**) to test the Flatpak build without creating a release.
 
 ## Config and rules
 
@@ -79,7 +83,7 @@ The GUI runs the monitor internally; these commands are optional.
 ## Requirements
 
 - Linux with PipeWire or PulseAudio
-- For the release binary: desktop and glibc
+- For the Flatpak: Freedesktop 24.08 runtime (installed with the bundle)
 - For source: Python 3.8+, PyQt6
 
 ## License

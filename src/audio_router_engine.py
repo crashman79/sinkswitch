@@ -7,7 +7,7 @@ import subprocess
 import logging
 from typing import Dict, List, Optional, Tuple
 from device_monitor import DeviceMonitor
-from host_command import host_cmd
+from host_command import host_cmd, SUBPROCESS_TEXT_KW
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +230,7 @@ class AudioRouterEngine:
                 host_cmd(['pactl', 'list', 'sink-inputs']),
                 capture_output=True,
                 text=True,
+                **SUBPROCESS_TEXT_KW,
                 timeout=5
             )
             
@@ -255,6 +256,7 @@ class AudioRouterEngine:
                 host_cmd(['pactl', 'list', 'sink-inputs']),
                 capture_output=True,
                 text=True,
+                **SUBPROCESS_TEXT_KW,
                 timeout=5
             )
             
@@ -314,6 +316,7 @@ class AudioRouterEngine:
                 host_cmd(['pactl', 'list', 'sinks']),
                 capture_output=True,
                 text=True,
+                **SUBPROCESS_TEXT_KW,
                 timeout=5
             )
             current_sink_id = None
@@ -363,6 +366,7 @@ class AudioRouterEngine:
                 host_cmd(['pactl', 'list', 'sink-inputs']),
                 capture_output=True,
                 text=True,
+                **SUBPROCESS_TEXT_KW,
                 timeout=5
             )
             
@@ -394,6 +398,7 @@ class AudioRouterEngine:
                         host_cmd(['pactl', 'move-sink-input', sink_input_id, target]),
                         capture_output=True,
                         text=True,
+                        **SUBPROCESS_TEXT_KW,
                         timeout=5,
                         check=False
                     )

@@ -10,23 +10,43 @@ The build downloads fixed Debian packages with checksums; **your host distro (e.
 ## Build and install (local)
 
 ```bash
-flatpak install -y flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+flatpak install --user flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
 cd /path/to/sinkswitch
 flatpak-builder --user --install --force-clean ../sinkswitch-flatpak-build flatpak/io.github.crashman79.sinkswitch.yml
 flatpak run io.github.crashman79.sinkswitch
 ```
 
-Python deps: **`flatpak/python-requirements.txt`** (PyYAML, certifi, PyQt6). **dbus-python** is omitted (unused in code; sdist needs mesonpy).
+**Python:** Vendored wheels in the manifest (PyYAML, certifi, PyQt6)—no build-time network for `pip`. **`flatpak/python-requirements.txt`** mirrors those versions for non-Flatpak installs. **dbus-python** is omitted (unused in code).
 
-The manifest uses **`--share=network`** during pip for local builds. **Flathub** expects vendored wheels (e.g. [flatpak-pip-generator](https://github.com/flatpak/flatpak-builder-tools)) and no network at build time.
+**GitHub Releases** attach a `.flatpak` bundle when you push a tag `v*` (see repo root README).
 
-## Publishing to Flathub
+### Optional: Flathub manifest (git-pinned upstream)
 
-See **[FLATHUB.md](./FLATHUB.md)** for the full checklist (screenshots, vendored Python wheels, PR flow). Summary:
+**`io.github.crashman79.sinkswitch-flathub.yml`** is the same layout with a **git `commit`** instead of `type: dir` for the app sources. See [FLATHUB.md](./FLATHUB.md).
 
-1. AppStream must include **screenshots** and a current **`<release>`** (see `io.github.crashman79.sinkswitch.metainfo.xml`).
-2. For the Flathub copy of the manifest, **pin Python deps** (no network at build time) using [flatpak-pip-generator](https://github.com/flathub/flatpak-builder-tools/tree/master/pip).
-3. Open a PR per [Flathub submission](https://docs.flathub.org/docs/for-app-authors/submission/).
+### Refreshing vendored Python wheels
+
+Freedesktop SDK **24.08** uses Python **3.12**. To bump PyYAML / certifi / PyQt6:
+
+1. Download wheels (x86_64 example):
+
+   ```bash
+   mkdir -p flatpak/flathub-pip-wheels/x86_64
+   python3 -m pip download -r flatpak/python-requirements.txt -d flatpak/flathub-pip-wheels/x86_64 \
+     --only-binary=:all: --python-version 312 \
+     --platform manylinux_2_28_x86_64 --platform manylinux2014_x86_64 \
+     --platform manylinux1_x86_64 --platform manylinux_2_5_x86_64
+   ```
+
+2. `sha256sum` each `.whl` and match URLs from PyPI JSON at `https://pypi.org/pypi/{project}/{version}/json` (`digests.sha256`).
+
+3. **aarch64** may need a different **PyQt6** line than x86_64 (PyPI); current split is **6.9.1 (x64)** vs **6.7.1 (arm)**.
+
+4. Update **`python3-deps.yml`**, then copy the two **`python3-deps-*`** modules into **`io.github.crashman79.sinkswitch.yml`** and **`io.github.crashman79.sinkswitch-flathub.yml`** so all three match.
+
+## Publishing to Flathub (optional)
+
+See **[FLATHUB.md](./FLATHUB.md)** if you submit to Flathub later.
 
 **Icons:** Canonical artwork lives in `data/icons/` (`io.github.crashman79.sinkswitch.svg` and `.png`); the Flatpak module installs them into `hicolor` (same as the PyInstaller bundle and in-app window/tray icon).
 

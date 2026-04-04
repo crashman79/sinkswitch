@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import os
-from typing import List, Sequence
+from typing import Dict, List, Sequence
+
+# pactl/pw-cli may emit property strings in the session encoding; strict UTF-8 fails.
+SUBPROCESS_TEXT_KW: Dict[str, str] = {"encoding": "utf-8", "errors": "replace"}
 
 # In Flatpak, read-only pactl (list, subscribe, get-default-sink, …) must stay
 # in the sandbox: it sees the same graph as the proxy. Running *all* pactl on
