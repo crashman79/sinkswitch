@@ -6,7 +6,7 @@ Device monitoring module for detecting and tracking audio output devices
 import logging
 import subprocess
 import json
-from host_command import host_cmd
+from host_command import host_cmd, SUBPROCESS_TEXT_KW
 from collections import defaultdict
 from typing import Dict, List, Optional, Callable, Set, Tuple
 from dataclasses import dataclass
@@ -66,7 +66,7 @@ class DeviceMonitor:
         try:
             r = subprocess.run(
                 host_cmd(['pactl', 'get-default-sink']),
-                capture_output=True, text=True, timeout=2
+                capture_output=True, text=True, timeout=2, **SUBPROCESS_TEXT_KW
             )
             if r.returncode == 0 and r.stdout.strip():
                 return r.stdout.strip()
@@ -79,7 +79,7 @@ class DeviceMonitor:
         try:
             r = subprocess.run(
                 host_cmd(['pactl', 'set-default-sink', sink_name]),
-                capture_output=True, text=True, timeout=2
+                capture_output=True, text=True, timeout=2, **SUBPROCESS_TEXT_KW
             )
             return r.returncode == 0
         except Exception as e:
@@ -100,6 +100,7 @@ class DeviceMonitor:
                 host_cmd(['pactl', 'list', 'cards']),
                 capture_output=True,
                 text=True,
+                **SUBPROCESS_TEXT_KW,
                 timeout=5
             )
             
@@ -162,6 +163,7 @@ class DeviceMonitor:
                 host_cmd(['pactl', 'list', 'sinks', 'short']),
                 capture_output=True,
                 text=True,
+                **SUBPROCESS_TEXT_KW,
                 timeout=5
             )
             
@@ -193,6 +195,7 @@ class DeviceMonitor:
                 host_cmd(['pactl', 'set-card-profile', card_name, profile]),
                 capture_output=True,
                 text=True,
+                **SUBPROCESS_TEXT_KW,
                 timeout=5,
                 check=True
             )
@@ -289,6 +292,7 @@ class DeviceMonitor:
                 host_cmd(['pactl', 'list', 'sinks']),
                 capture_output=True,
                 text=True,
+                **SUBPROCESS_TEXT_KW,
                 timeout=5
             )
             
@@ -339,6 +343,7 @@ class DeviceMonitor:
                 host_cmd(['pactl', 'list', 'sinks']),
                 capture_output=True,
                 text=True,
+                **SUBPROCESS_TEXT_KW,
                 timeout=5
             )
             
@@ -524,6 +529,7 @@ class DeviceMonitor:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                **SUBPROCESS_TEXT_KW,
                 bufsize=1,
             )
         except (FileNotFoundError, OSError) as e:
@@ -623,6 +629,7 @@ class DeviceMonitor:
                 host_cmd(['pactl', 'list', 'sink-inputs']),
                 capture_output=True,
                 text=True,
+                **SUBPROCESS_TEXT_KW,
                 check=False,
             )
             if result.returncode != 0:
@@ -884,6 +891,7 @@ class DeviceMonitor:
                 host_cmd(['pactl', 'list', 'source-outputs', 'short']),
                 capture_output=True,
                 text=True,
+                **SUBPROCESS_TEXT_KW,
                 timeout=5
             )
             

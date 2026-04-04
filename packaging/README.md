@@ -12,7 +12,7 @@ SinkSwitch runs **`pactl` and `pw-cli` on the host**. The **Flatpak** build does
 2. **From source** — `pip install -r requirements.txt` and `python3 run_app.py` (same as README).
 3. **User venv install** — `packaging/install-user-venv.sh` installs dependencies into `~/.local/share/sinkswitch/venv` and a small launcher you can put on `PATH`. Uses your system Python; PyQt6 and PipeWire control stay aligned with the machine.
 4. **PyInstaller onedir** — `./build.sh --onedir` produces `dist/sinkswitch/` (folder with `sinkswitch` executable). Same bundling logic as the onefile release, but easier to debug and to override libraries if needed.
-5. **PyInstaller onefile** — `./build.sh` → `dist/sinkswitch` (what GitHub Releases ship today). Smallest download; most sensitive to host/system library mismatch.
+5. **PyInstaller onefile** — `./build.sh` → `dist/sinkswitch`. Smallest local bundle; most sensitive to host/system library mismatch. **GitHub Releases ship Flatpak only.**
 
 ## Environment hints (frozen builds)
 

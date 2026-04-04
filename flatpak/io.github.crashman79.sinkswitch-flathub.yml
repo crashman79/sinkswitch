@@ -1,9 +1,11 @@
-# Flatpak manifest for SinkSwitch (build from repository root):
-#   flatpak install --user flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
-#   flatpak-builder --user --install --force-clean build-dir flatpak/io.github.crashman79.sinkswitch.yml
+# Flathub submission manifest (offline Python install, git pin).
+# Keep python3-deps-* modules in sync with io.github.crashman79.sinkswitch.yml / python3-deps.yml.
+# Copy this file into your flathub fork as:
+#   io.github.crashman79.sinkswitch/io.github.crashman79.sinkswitch.yml
+# Update `sources[0].commit` to match the upstream release you are publishing.
 #
-# Vendored Python wheels (no pip at build time). Keep wheel modules in sync with
-# flatpak/python3-deps.yml. Optional Flathub copy with git pin: -flathub.yml
+# Local test:
+#   flatpak-builder --user --force-clean build-dir flatpak/io.github.crashman79.sinkswitch-flathub.yml
 
 id: io.github.crashman79.sinkswitch
 runtime: org.freedesktop.Platform
@@ -18,15 +20,11 @@ finish-args:
   - --socket=fallback-x11
   - --socket=session-bus
   - --device=dri
-  # Bundled pactl uses the Pulse proxy to the host PipeWire/Pulse session
   - --socket=pulseaudio
-  # pw-cli still runs on the host
   - --talk-name=org.freedesktop.Flatpak
-  # Login autostart: org.freedesktop.portal.Background (RequestBackground)
   - --talk-name=org.freedesktop.portal.Desktop
 
 modules:
-  # Debian .deb clients: reproducible URLs; host distro (Arch, etc.) does not matter.
   - name: pulseaudio-client
     buildsystem: simple
     build-commands:
@@ -77,7 +75,6 @@ modules:
         dest-filename: libasyncns0.deb
         sha256: 30ec77ed3695fc09863427bf30e27318b74909089144ac24db17c3ab1f184a62
 
-  # Keep in sync with flatpak/python3-deps.yml (and io.github.crashman79.sinkswitch-flathub.yml).
   - name: python3-deps-x86_64
     only-arches: [x86_64]
     buildsystem: simple
@@ -145,5 +142,6 @@ modules:
       - install -Dm644 data/icons/io.github.crashman79.sinkswitch.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/audio-card.svg
       - install -Dm644 data/icons/io.github.crashman79.sinkswitch.png ${FLATPAK_DEST}/share/icons/hicolor/128x128/apps/audio-card.png
     sources:
-      - type: dir
-        path: ..
+      - type: git
+        url: https://github.com/crashman79/sinkswitch.git
+        commit: bbbc76ef5d0eea15c799e9699c0df2f12d7f2fad

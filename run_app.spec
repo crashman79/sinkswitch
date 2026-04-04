@@ -32,6 +32,7 @@ a = Analysis(
         'config_parser',
         'audio_router_engine',
         'intelligent_audio_router',
+        'portal_background',
         'yaml',
         'certifi',
     ],
