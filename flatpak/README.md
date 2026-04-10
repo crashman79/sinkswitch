@@ -9,6 +9,8 @@ The build downloads fixed Debian packages with checksums; **your host distro (e.
 
 ## Build and install (local)
 
+From the repository root you can use **`./build-and-run.sh`** (installs runtime/SDK if needed, builds, installs to your user Flatpak, then runs the app). Same steps by hand:
+
 ```bash
 flatpak install --user flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
 cd /path/to/sinkswitch

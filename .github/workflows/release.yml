@@ -2,8 +2,11 @@ name: Flatpak release
 
 on:
   push:
+    branches:
+      - '**'
     tags:
       - 'v*'
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -21,8 +24,9 @@ jobs:
           else
             VERSION="$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo 0.0.0)-dev.${GITHUB_RUN_NUMBER}"
           fi
+          BUILD_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          printf '__version__ = "%s"\n' "$VERSION" > src/_version.py
+          printf '__version__ = "%s"\n__build_timestamp__ = "%s"\n' "$VERSION" "$BUILD_TS" > src/_version.py
           DATE="$(date -u +%Y-%m-%d)"
           python3 << PY
           import pathlib, re
@@ -85,6 +89,6 @@ jobs:
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
-          artifacts: "_release/sinkswitch-${{ env.VERSION }}-x86_64.flatpak"
+          artifacts: "_release/sinkswitch-*-x86_64.flatpak"
           generateReleaseNotes: true
           token: ${{ secrets.GITHUB_TOKEN }}

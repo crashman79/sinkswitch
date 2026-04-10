@@ -60,6 +60,9 @@ class AudioRouterEngine:
         for rule in rules:
             result = self._apply_rule(rule)
             results.append(result)
+
+        # Also enforce fallback behavior for streams that do not match any rule.
+        results.append(self._route_unmatched_streams_to_default(rules))
         
         return results
     
@@ -190,7 +193,9 @@ class AudioRouterEngine:
         Returns:
             True if application matches rule
         """
-        app_lower = app_name.lower()
+        app_lower = (app_name or '').lower().strip()
+        if not app_lower:
+            return False
         
         # Check exact matches
         for app in applications:
@@ -203,6 +208,122 @@ class AudioRouterEngine:
                 return True
         
         return False
+
+    def _matches_any_rule(self, app_name: str, rules: List[Dict]) -> bool:
+        """Return True when app_name matches any configured routing rule."""
+        for rule in rules:
+            if self._matches_rule(
+                app_name,
+                rule.get('applications', []),
+                rule.get('application_keywords', []),
+            ):
+                return True
+        return False
+
+    def _get_sink_inputs(self) -> List[Dict[str, str]]:
+        """Return sink-input rows with index, sink (numeric id), and application_name."""
+        try:
+            result = subprocess.run(
+                host_cmd(['pactl', 'list', 'sink-inputs']),
+                capture_output=True,
+                text=True,
+                **SUBPROCESS_TEXT_KW,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                return []
+
+            streams: List[Dict[str, str]] = []
+            current: Dict[str, str] = {}
+            for raw_line in result.stdout.split('\n'):
+                line = raw_line.strip()
+                if line.startswith('Sink Input #'):
+                    if current and current.get('index'):
+                        streams.append(current)
+                    current = {'index': line.split('#', 1)[1].strip()}
+                elif not current:
+                    continue
+                elif line.startswith('Sink:'):
+                    sink_part = line.split(':', 1)[1].strip().split()
+                    if sink_part:
+                        current['sink'] = sink_part[0]
+                elif 'application.name' in line and '=' in line:
+                    app_name = line.split('=', 1)[1].strip().strip('"')
+                    current['application_name'] = app_name
+
+            if current and current.get('index'):
+                streams.append(current)
+            return streams
+        except Exception as e:
+            logger.debug(f"Failed to read sink inputs: {e}")
+            return []
+
+    def _move_sink_input(self, sink_input_id: str, target_sink_name: str, target_sink_id: str) -> bool:
+        """Move one sink-input, trying sink name first then numeric id."""
+        for target in (target_sink_name, target_sink_id):
+            move_res = subprocess.run(
+                host_cmd(['pactl', 'move-sink-input', sink_input_id, target]),
+                capture_output=True,
+                text=True,
+                **SUBPROCESS_TEXT_KW,
+                timeout=5,
+                check=False,
+            )
+            if move_res.returncode == 0:
+                return True
+        err = (move_res.stderr or move_res.stdout or '').strip()
+        logger.warning(
+            "move-sink-input failed for %s -> %s / #%s: %s",
+            sink_input_id,
+            target_sink_name,
+            target_sink_id,
+            err or f"exit {move_res.returncode}",
+        )
+        return False
+
+    def _route_unmatched_streams_to_default(self, rules: List[Dict]) -> Dict:
+        """Move streams that match no rule to the current default sink."""
+        default_sink_name = self.device_monitor.get_default_sink()
+        if not default_sink_name:
+            return {
+                'rule_name': 'Default fallback',
+                'success': False,
+                'routed_count': 0,
+                'message': 'No default sink available',
+            }
+
+        resolved = self._resolve_sink(default_sink_name)
+        if not resolved:
+            return {
+                'rule_name': 'Default fallback',
+                'success': False,
+                'routed_count': 0,
+                'message': f"Could not resolve default sink: {default_sink_name}",
+            }
+
+        default_sink_id, default_sink_name_resolved = resolved
+        streams = self._get_sink_inputs()
+        moved = 0
+
+        for stream in streams:
+            app_name = stream.get('application_name', '')
+            if self._matches_any_rule(app_name, rules):
+                continue
+            if stream.get('sink') == default_sink_id:
+                continue
+
+            sink_input_id = stream.get('index')
+            if not sink_input_id:
+                continue
+            if self._move_sink_input(sink_input_id, default_sink_name_resolved, default_sink_id):
+                moved += 1
+
+        return {
+            'rule_name': 'Default fallback',
+            'success': True,
+            'routed_count': moved,
+            'message': f"Routed {moved} unmatched stream(s) to default output",
+        }
     
     def _get_running_applications(self) -> List[str]:
         """Get list of currently running applications

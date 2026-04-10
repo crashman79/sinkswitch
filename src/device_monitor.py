@@ -770,22 +770,37 @@ class DeviceMonitor:
         return False
 
     def _stream_change_involves_rules(self, current_streams: List[Dict], rules_ref: List[Dict]) -> bool:
-        """True if rule-matching streams changed (count, identity, or current sink)."""
+        """True if any stream changed in a way that can affect routing outcomes."""
         if not rules_ref:
             return True
 
+        def stream_sig(s: Dict) -> tuple:
+            return (
+                s.get('index') or '',
+                s.get('application_name') or '',
+                s.get('sink') or '',
+            )
+
         def matching_sigs(streams: List[Dict]) -> frozenset:
             return frozenset(
-                (
-                    s.get('index') or '',
-                    s.get('application_name') or '',
-                    s.get('sink') or '',
-                )
+                stream_sig(s)
                 for s in streams
                 if any(self._app_matches_rule(s.get('application_name') or '', r) for r in rules_ref)
             )
 
-        return matching_sigs(current_streams) != matching_sigs(self.last_streams)
+        if matching_sigs(current_streams) != matching_sigs(self.last_streams):
+            return True
+
+        # Unmatched streams are also routing-relevant because they should follow
+        # the current default sink fallback behavior.
+        def unmatched_sigs(streams: List[Dict]) -> frozenset:
+            return frozenset(
+                stream_sig(s)
+                for s in streams
+                if not any(self._app_matches_rule(s.get('application_name') or '', r) for r in rules_ref)
+            )
+
+        return unmatched_sigs(current_streams) != unmatched_sigs(self.last_streams)
     
     def _is_significant_device_change(self, current_devices: List[Dict]) -> bool:
         """Check if device changes are significant enough to trigger config regeneration

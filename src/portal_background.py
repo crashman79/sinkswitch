@@ -84,15 +84,15 @@ class PortalBackgroundRequest(QObject):
         )
         msg.setArguments([parent_window, opts])
 
-        pending = self._bus.asyncCall(msg)
-        self._watcher = QDBusPendingCallWatcher(pending)
+        # PyQt6 QDBusPendingCallWatcher has no pendingCall(); keep the call for the reply.
+        self._pending = self._bus.asyncCall(msg)
+        self._watcher = QDBusPendingCallWatcher(self._pending)
         self._watcher.setParent(self)
         self._watcher.finished.connect(self._on_request_finished)
 
     def _on_request_finished(self, watcher: QDBusPendingCallWatcher) -> None:
-        pending = watcher.pendingCall()
         watcher.deleteLater()
-        pr = QDBusPendingReply(pending)
+        pr = QDBusPendingReply(self._pending)
         if not pr.isFinished():
             self._finish(False, "Portal call did not complete.")
             return

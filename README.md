@@ -40,16 +40,15 @@ python3 run_app.py
 
 Same config and behavior; config dir is `~/.config/sinkswitch/` (or set `AUDIO_ROUTER_CONFIG`).
 
-### Optional: local PyInstaller binary (development)
+### Quick Flatpak build and run (development)
 
-Releases ship **Flatpak only**. To build a standalone binary on your machine (debugging, etc.):
+Requires Flatpak, `flatpak-builder`, and Freedesktop 24.08 runtime/SDK (see **[flatpak/README.md](flatpak/README.md)**).
 
 ```bash
-./build.sh
-./dist/sinkswitch
+./build-and-run.sh
 ```
 
-**Onedir:** `./build.sh --onedir` → `./dist/sinkswitch/sinkswitch`. See `packaging/README.md`. For day-to-day use, prefer **Flatpak** or **source/venv**.
+Use `./build-and-run.sh --clean` to remove the default build directory (`../sinkswitch-flatpak-build`) before rebuilding. Pass app flags after `--`, e.g. `./build-and-run.sh -- --minimized`.
 
 ### Releasing a new version
 

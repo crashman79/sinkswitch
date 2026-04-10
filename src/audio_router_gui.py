@@ -30,9 +30,10 @@ UPDATES_NEW_BINARY = UPDATES_CACHE_DIR / "sinkswitch.new"
 _SINGLE_INSTANCE_LOCK_FILE = None  # hold open for process lifetime
 
 try:
-    from _version import __version__
+    from _version import __version__, __build_timestamp__
 except ImportError:
     __version__ = "0.0.0-dev"  # running from source without build
+    __build_timestamp__ = "source"
 
 # Config base: set by run_app.py or default
 def _acquire_single_instance_lock() -> bool:
@@ -1216,6 +1217,7 @@ class AudioRouterGUI(QMainWindow):
 
         _wrap_rich("<b>SinkSwitch</b>")
         _wrap_plain(f"Version {__version__}")
+        _wrap_plain(f"Build timestamp (UTC): {__build_timestamp__}")
         sl.addSpacing(12)
         _wrap_rich("<b>Default routing (out of the box)</b>")
         _wrap_plain(
@@ -1503,6 +1505,7 @@ class AudioRouterGUI(QMainWindow):
     def update_streams(self, streams: List[Dict]):
         """Update active streams table: app, output device (friendly), route (rule or Default)."""
         sink_index_to_name = self._get_sink_index_to_name()
+        default_sink_name = DeviceMonitor().get_default_sink() or ''
         self.streams_table.setRowCount(len(streams))
         for i, stream in enumerate(streams):
             app_name = (
@@ -1521,9 +1524,14 @@ class AudioRouterGUI(QMainWindow):
             if not out_label:
                 out_label = sink_name or 'Unknown'
             self.streams_table.setItem(i, 1, QTableWidgetItem(out_label))
-            # Route: matching rule name or Default
+            # Route: matching rule name or fallback status for unmatched streams.
             rule = self._rule_for_app(app_name)
-            route_label = rule.get('name', 'Default') if rule else 'Default'
+            if rule:
+                route_label = rule.get('name', 'Default')
+            elif sink_name and default_sink_name and sink_name != default_sink_name:
+                route_label = 'Unmatched (not on default)'
+            else:
+                route_label = 'Default'
             self.streams_table.setItem(i, 2, QTableWidgetItem(route_label))
     
     def get_device_type_icon(self, device_type: str) -> str:
