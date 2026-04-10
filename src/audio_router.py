@@ -65,7 +65,7 @@ def apply_rules(config_file: str):
         print("\nRouting Results:")
         print("-" * 80)
         for result in results:
-            status = "✓" if result['success'] else "✗"
+            status = "OK" if result['success'] else "ERR"
             print(f"{status} {result['rule_name']}: {result['message']}")
         
         print("-" * 80)
@@ -96,7 +96,7 @@ def generate_config(config_file: str):
         with open(config_file, 'w') as f:
             yaml.dump(config, f, default_flow_style=False, sort_keys=False)
         
-        print(f"\n✓ Routing rules saved to {config_file}")
+        print(f"\nOK Routing rules saved to {config_file}")
         return 0
         
     except Exception as e:

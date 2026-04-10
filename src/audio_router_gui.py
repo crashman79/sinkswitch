@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SinkSwitch – standalone GUI app for per-app audio routing.
+SinkSwitch - standalone GUI app for per-app audio routing.
 Device monitoring and routing run inside this app; no systemd or install script required.
 
 Requirements: Python 3.8+, PyQt6, PyYAML (pip install -r requirements.txt)
@@ -501,44 +501,173 @@ def _save_app_settings(data: Dict[str, Any]) -> None:
     s.sync()
 
 
+_LIGHT_THEME_COLORS = {
+    "bg_color": "#FFFFFF",
+    "text_color": "#000000",
+    "alt_bg_color": "#F5F5F5",
+    "selection_color": "#0078D4",
+    "border_color": "#D0D0D0",
+}
+
+_DARK_THEME_COLORS = {
+    "bg_color": "#2D2D30",
+    "text_color": "#FFFFFF",
+    "alt_bg_color": "#3E3E42",
+    "selection_color": "#0E639C",
+    "border_color": "#555555",
+}
+
+
+def _theme_colors(theme: str) -> Dict[str, str]:
+    return _DARK_THEME_COLORS if theme == "dark" else _LIGHT_THEME_COLORS
+
+
+def _darken_color(color: str, percent: int) -> str:
+    color = color.lstrip("#")
+    r, g, b = int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
+    r = max(0, int(r * (100 - percent) / 100))
+    g = max(0, int(g * (100 - percent) / 100))
+    b = max(0, int(b * (100 - percent) / 100))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _create_theme_palette(theme: str) -> QPalette:
+    colors = _theme_colors(theme)
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(colors["bg_color"]))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(colors["text_color"]))
+    palette.setColor(QPalette.ColorRole.Base, QColor(colors["bg_color"]))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(colors["alt_bg_color"]))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(colors["alt_bg_color"]))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(colors["text_color"]))
+    palette.setColor(QPalette.ColorRole.Text, QColor(colors["text_color"]))
+    palette.setColor(QPalette.ColorRole.Button, QColor(colors["alt_bg_color"]))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(colors["text_color"]))
+    palette.setColor(QPalette.ColorRole.BrightText, QColor(colors["text_color"]))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(colors["selection_color"]))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(colors["bg_color"]))
+    palette.setColor(QPalette.ColorRole.Link, QColor(colors["selection_color"]))
+    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor("#7F7F7F"))
+    return palette
+
+
+def _create_theme_stylesheet(theme: str) -> str:
+    colors = _theme_colors(theme)
+    return f"""
+        QMainWindow {{
+            background-color: {colors['bg_color']};
+            color: {colors['text_color']};
+        }}
+        QWidget {{
+            background-color: {colors['bg_color']};
+            color: {colors['text_color']};
+        }}
+        QGroupBox {{
+            border: 1px solid {colors['border_color']};
+            border-radius: 4px;
+            margin-top: 10px;
+            padding-top: 10px;
+        }}
+        QGroupBox::title {{
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 3px 0 3px;
+        }}
+        QPushButton {{
+            background-color: {colors['alt_bg_color']};
+            color: {colors['text_color']};
+            border: 1px solid {colors['border_color']};
+            padding: 5px;
+            border-radius: 3px;
+        }}
+        QPushButton:hover {{
+            background-color: {colors['selection_color']};
+            color: {colors['bg_color']};
+        }}
+        QPushButton:pressed {{
+            background-color: {_darken_color(colors['selection_color'], 20)};
+        }}
+        QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
+            background-color: {colors['bg_color']};
+            color: {colors['text_color']};
+            border: 1px solid {colors['border_color']};
+            padding: 3px;
+            border-radius: 3px;
+        }}
+        QListWidget, QTextEdit, QTableWidget {{
+            background-color: {colors['bg_color']};
+            color: {colors['text_color']};
+            border: 1px solid {colors['border_color']};
+            border-radius: 3px;
+            gridline-color: {colors['border_color']};
+        }}
+        QTableWidget::item:selected, QListWidget::item:selected {{
+            background-color: {colors['selection_color']};
+            color: {colors['bg_color']};
+        }}
+        QHeaderView::section {{
+            background-color: {colors['alt_bg_color']};
+            color: {colors['text_color']};
+            border: 1px solid {colors['border_color']};
+            padding: 4px;
+        }}
+        QCheckBox, QLabel {{
+            color: {colors['text_color']};
+        }}
+        QTabBar::tab {{
+            background-color: {colors['alt_bg_color']};
+            color: {colors['text_color']};
+            padding: 5px;
+            border: 1px solid {colors['border_color']};
+        }}
+        QTabBar::tab:selected {{
+            background-color: {colors['selection_color']};
+            color: {colors['bg_color']};
+        }}
+        QMenuBar {{
+            background-color: {colors['alt_bg_color']};
+            color: {colors['text_color']};
+        }}
+        QMenu {{
+            background-color: {colors['alt_bg_color']};
+            color: {colors['text_color']};
+            border: 1px solid {colors['border_color']};
+        }}
+        QMenu::item:selected {{
+            background-color: {colors['selection_color']};
+            color: {colors['bg_color']};
+        }}
+        QStatusBar {{
+            border-top: 1px solid {colors['border_color']};
+        }}
+        QScrollBar:vertical {{
+            background-color: {colors['bg_color']};
+            width: 12px;
+        }}
+        QScrollBar::handle:vertical {{
+            background-color: {colors['alt_bg_color']};
+            border-radius: 6px;
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background-color: {colors['selection_color']};
+        }}
+    """
+
+
 def _apply_theme(app: "QApplication", theme: str) -> None:
     """Apply light, dark, or system theme. theme is 'light' | 'dark' | 'system'."""
     if theme not in ("light", "dark", "system"):
         theme = "system"
     try:
         if theme == "system":
+            app.setStyleSheet("")
             app.setPalette(app.style().standardPalette())
             return
-        palette = QPalette()
-        if theme == "dark":
-            palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
-            palette.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
-            palette.setColor(QPalette.ColorRole.Base, QColor(35, 35, 35))
-            palette.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
-            palette.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
-            palette.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
-            palette.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
-            palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
-            palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
-            palette.setColor(QPalette.ColorRole.Link, QColor(42, 130, 218))
-            palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(127, 127, 127))
-            palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(50, 50, 50))
-            palette.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
-        else:  # light
-            palette.setColor(QPalette.ColorRole.Window, Qt.GlobalColor.white)
-            palette.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.black)
-            palette.setColor(QPalette.ColorRole.Base, QColor(255, 255, 255))
-            palette.setColor(QPalette.ColorRole.AlternateBase, QColor(240, 240, 240))
-            palette.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.black)
-            palette.setColor(QPalette.ColorRole.Button, QColor(240, 240, 240))
-            palette.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.black)
-            palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
-            palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.white)
-            palette.setColor(QPalette.ColorRole.Link, QColor(0, 0, 255))
-            palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(127, 127, 127))
-            palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(255, 255, 220))
-            palette.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.black)
+        palette = _create_theme_palette(theme)
+        stylesheet = _create_theme_stylesheet(theme)
+        app.setStyle("Fusion")
         app.setPalette(palette)
+        app.setStyleSheet(stylesheet)
     except Exception as e:
         logger.warning("Failed to apply theme %s: %s", theme, e)
 
@@ -788,9 +917,9 @@ class AudioRouterGUI(QMainWindow):
         show_act = self.tray_menu.addAction("Show")
         show_act.triggered.connect(self._show_from_tray)
         self.tray_menu.addSeparator()
-        self.tray_start_or_restart_act = self.tray_menu.addAction("▶ Start router")
+        self.tray_start_or_restart_act = self.tray_menu.addAction("Start router")
         self.tray_start_or_restart_act.triggered.connect(self._on_start_or_restart_clicked)
-        self.tray_stop_act = self.tray_menu.addAction("⏸ Stop router")
+        self.tray_stop_act = self.tray_menu.addAction("Stop router")
         self.tray_stop_act.triggered.connect(self.stop_service)
         self.tray_menu.addSeparator()
         quit_act = self.tray_menu.addAction("Quit")
@@ -806,7 +935,7 @@ class AudioRouterGUI(QMainWindow):
             return
         running = self._router_running()
         self.tray_start_or_restart_act.setText(
-            "🔄 Restart router" if running else "▶ Start router"
+            "Restart router" if running else "Start router"
         )
         self.tray_stop_act.setEnabled(running)
 
@@ -950,11 +1079,11 @@ class AudioRouterGUI(QMainWindow):
         toolbar_layout.addStretch()
         
         # Service control: one Start/Restart button + Stop (disabled when not running)
-        self.start_or_restart_btn = QPushButton("▶ Start")
+        self.start_or_restart_btn = QPushButton("Start")
         self.start_or_restart_btn.clicked.connect(self._on_start_or_restart_clicked)
         toolbar_layout.addWidget(self.start_or_restart_btn)
 
-        self.stop_btn = QPushButton("⏸ Stop")
+        self.stop_btn = QPushButton("Stop")
         self.stop_btn.clicked.connect(self.stop_service)
         toolbar_layout.addWidget(self.stop_btn)
         
@@ -966,27 +1095,27 @@ class AudioRouterGUI(QMainWindow):
         
         # Tab 1: Devices
         devices_tab = self.create_devices_tab()
-        tabs.addTab(devices_tab, "🎧 Devices")
+        tabs.addTab(devices_tab, "Devices")
         
         # Tab 2: Routing Rules
         rules_tab = self.create_rules_tab()
-        tabs.addTab(rules_tab, "🔀 Routing Rules")
+        tabs.addTab(rules_tab, "Routing Rules")
         
         # Tab 3: Active Streams
         streams_tab = self.create_streams_tab()
-        tabs.addTab(streams_tab, "📊 Active Streams")
+        tabs.addTab(streams_tab, "Active Streams")
         
         # Tab 4: Logs
         logs_tab = self.create_logs_tab()
-        tabs.addTab(logs_tab, "📋 Logs")
+        tabs.addTab(logs_tab, "Logs")
 
         # Tab 5: Settings
         settings_tab = self.create_settings_tab()
-        tabs.addTab(settings_tab, "⚙️ Settings")
+        tabs.addTab(settings_tab, "Settings")
 
         # Tab 6: About
         about_tab = self.create_about_tab()
-        tabs.addTab(about_tab, "ℹ️ About")
+        tabs.addTab(about_tab, "About")
 
         _tab_tips = [
             "Sinks PipeWire/Pulse sees (Bluetooth, USB, built-in, HDMI)",
@@ -1009,7 +1138,7 @@ class AudioRouterGUI(QMainWindow):
         widget.setLayout(layout)
         
         # Refresh button
-        refresh_btn = QPushButton("🔄 Refresh Devices")
+        refresh_btn = QPushButton("Refresh Devices")
         refresh_btn.clicked.connect(self.refresh_devices)
         layout.addWidget(refresh_btn)
         
@@ -1017,7 +1146,7 @@ class AudioRouterGUI(QMainWindow):
         self.devices_table = QTableWidget()
         self.devices_table.setColumnCount(4)
         self.devices_table.setHorizontalHeaderLabels(['Status', 'Name', 'Type', 'Device ID'])
-        self.devices_table.setToolTip("Name = friendly name; Device ID = internal sink name used for routing")
+        self.devices_table.setToolTip("Status shows [ON]/[OFF]; Name = friendly name; Device ID = internal sink name used for routing")
         self.devices_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.devices_table.setColumnWidth(0, 56)
         self.devices_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -1038,25 +1167,25 @@ class AudioRouterGUI(QMainWindow):
         # Buttons
         button_layout = QHBoxLayout()
         
-        add_btn = QPushButton("➕ Add Rule")
+        add_btn = QPushButton("Add Rule")
         add_btn.clicked.connect(self.add_rule)
         button_layout.addWidget(add_btn)
         
-        edit_btn = QPushButton("✏️ Edit Rule")
+        edit_btn = QPushButton("Edit Rule")
         edit_btn.clicked.connect(self.edit_rule)
         button_layout.addWidget(edit_btn)
         
-        delete_btn = QPushButton("🗑️ Delete Rule")
+        delete_btn = QPushButton("Delete Rule")
         delete_btn.clicked.connect(self.delete_rule)
         button_layout.addWidget(delete_btn)
         
         button_layout.addStretch()
         
-        auto_gen_btn = QPushButton("🤖 Auto-Generate Rules")
+        auto_gen_btn = QPushButton("Auto-Generate Rules")
         auto_gen_btn.clicked.connect(self.auto_generate_rules)
         button_layout.addWidget(auto_gen_btn)
         
-        save_btn = QPushButton("💾 Save Config")
+        save_btn = QPushButton("Save Config")
         save_btn.clicked.connect(self.save_config)
         button_layout.addWidget(save_btn)
         
@@ -1103,11 +1232,11 @@ class AudioRouterGUI(QMainWindow):
         # Buttons
         button_layout = QHBoxLayout()
         
-        refresh_logs_btn = QPushButton("🔄 Refresh")
+        refresh_logs_btn = QPushButton("Refresh")
         refresh_logs_btn.clicked.connect(self.refresh_logs)
         button_layout.addWidget(refresh_logs_btn)
         
-        clear_logs_btn = QPushButton("🗑️ Clear")
+        clear_logs_btn = QPushButton("Clear")
         clear_logs_btn.clicked.connect(lambda: self.logs_text.clear())
         button_layout.addWidget(clear_logs_btn)
         
@@ -1222,15 +1351,15 @@ class AudioRouterGUI(QMainWindow):
         _wrap_rich("<b>Default routing (out of the box)</b>")
         _wrap_plain(
             "On first run, SinkSwitch creates a config and may auto-generate routing rules from your connected devices "
-            "(e.g. browsers, meetings, media → Bluetooth or USB headset). You can edit or remove these in the Routing Rules tab. "
+            "(e.g. browsers, meetings, media -> Bluetooth or USB headset). You can edit or remove these in the Routing Rules tab. "
             "Until you click Start, the router does nothing. Once running, matched streams follow rules; "
             "everything else goes to the Default output in the toolbar."
         )
         sl.addSpacing(12)
         _wrap_rich("<b>Technology</b>")
-        _wrap_plain("• Python 3, PyQt6 (GUI)")
-        _wrap_plain("• PipeWire / PulseAudio (pactl)")
-        _wrap_plain("• YAML config; Flatpak login autostart uses the desktop portal")
+        _wrap_plain("- Python 3, PyQt6 (GUI)")
+        _wrap_plain("- PipeWire / PulseAudio (pactl)")
+        _wrap_plain("- YAML config; Flatpak login autostart uses the desktop portal")
         sl.addSpacing(8)
         _wrap_rich("<b>Config and routing rules</b>")
         _wrap_plain(
@@ -1363,7 +1492,7 @@ class AudioRouterGUI(QMainWindow):
         pair = (login_autostart, start_minimized_at_login)
         if os.environ.get("FLATPAK_ID"):
             if pair != self._portal_login_snapshot:
-                self.statusBar().showMessage("Complete the system dialog for login autostart…", 6000)
+                self.statusBar().showMessage("Complete the system dialog for login autostart...", 6000)
 
                 def _on_portal_done(ok: bool, msg: str) -> None:
                     if ok:
@@ -1454,7 +1583,7 @@ class AudioRouterGUI(QMainWindow):
         
         for i, device in enumerate(devices):
             # Status indicator
-            status_icon = "🟢" if device.get('connected') else "🔴"
+            status_icon = "[ON]" if device.get('connected') else "[OFF]"
             self.devices_table.setItem(i, 0, QTableWidgetItem(status_icon))
             # Friendly name (fallback to name/id)
             display_name = device.get('friendly_name') or device.get('name') or device.get('id', '')
@@ -1535,17 +1664,17 @@ class AudioRouterGUI(QMainWindow):
             self.streams_table.setItem(i, 2, QTableWidgetItem(route_label))
     
     def get_device_type_icon(self, device_type: str) -> str:
-        """Get emoji icon for device type"""
+        """Get short ASCII marker for device type."""
         icons = {
-            'bluetooth': '🔵',
-            'bluetooth_earbuds': '🎧',
-            'usb_headset': '🎧',
-            'usb_speakers': '🔊',
-            'analog_speakers': '🔊',
-            'hdmi': '📺',
-            'unknown': '❓'
+            'bluetooth': 'BT',
+            'bluetooth_earbuds': 'HS',
+            'usb_headset': 'HS',
+            'usb_speakers': 'SPK',
+            'analog_speakers': 'SPK',
+            'hdmi': 'HDMI',
+            'unknown': '?'
         }
-        return icons.get(device_type, '🔊')
+        return icons.get(device_type, 'SPK')
     
     def _router_running(self) -> bool:
         return self.monitor_thread is not None and self.monitor_thread.isRunning()
@@ -1554,12 +1683,12 @@ class AudioRouterGUI(QMainWindow):
         """Update router status and Start/Restart + Stop button states."""
         running = self._router_running()
         if running:
-            self.status_label.setText("Router: 🟢 Running")
+            self.status_label.setText("Router: Running")
             self.status_label.setStyleSheet("color: green; font-weight: bold; padding: 5px;")
         else:
-            self.status_label.setText("Router: 🔴 Stopped")
+            self.status_label.setText("Router: Stopped")
             self.status_label.setStyleSheet("color: red; font-weight: bold; padding: 5px;")
-        self.start_or_restart_btn.setText("🔄 Restart" if running else "▶ Start")
+        self.start_or_restart_btn.setText("Restart" if running else "Start")
         self.stop_btn.setEnabled(running)
     
     def refresh_devices(self):
@@ -1614,7 +1743,7 @@ class AudioRouterGUI(QMainWindow):
             self.rules_table.setItem(i, 2, QTableWidgetItem(target))
             
             # Fallback
-            fallback = "Yes" if rule.get('enable_default_fallback', True) else "No"
+            fallback = "[AUTO]" if rule.get('enable_default_fallback', True) else "[LOCKED]"
             self.rules_table.setItem(i, 3, QTableWidgetItem(fallback))
     
     def add_rule(self):
