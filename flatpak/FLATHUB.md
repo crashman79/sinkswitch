@@ -8,6 +8,19 @@ Before opening the Flathub PR:
 
 1. **Metadata** — `flatpak/io.github.crashman79.sinkswitch.metainfo.xml` must satisfy [AppStream requirements](https://docs.flathub.org/docs/for-app-authors/requirements), including screenshots. The default screenshot URL is  
    `https://raw.githubusercontent.com/crashman79/sinkswitch/main/docs/flathub/main-window.png` — keep that file on `main` after you change it.
+   Ensure the screenshot reflects the current UI (status icons in Devices and current toolbar/tab layout).
+
+### Refreshing screenshots
+
+Update `docs/flathub/main-window.png` before a release when the UI changes.
+
+Example capture command (KDE):
+
+```bash
+spectacle -b -a -n -d 1200 -o docs/flathub/main-window.png
+```
+
+Note: `-a/--activewindow` captures whichever window is focused at capture time. Focus SinkSwitch first.
 2. **Build locally** — Install Freedesktop 24.08 runtime/SDK and run `flatpak-builder` against **`flatpak/io.github.crashman79.sinkswitch-flathub.yml`** (or [org.flatpak.Builder](https://docs.flathub.org/docs/for-app-authors/submission#build-and-install)).
 3. **Linter** — Run before the PR (requires `org.flatpak.Builder`):
 

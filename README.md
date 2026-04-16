@@ -2,7 +2,16 @@
 
 Route application audio to different outputs (Bluetooth, USB, HDMI, etc.) by rule. Runs as a standalone GUI on Linux with PipeWire or PulseAudio.
 
-**What it does:** Pick a default output, then define rules so specific apps (browsers, meetings, music players) always use the device you choose. The router runs inside the app—use **Start** / **Stop** in the toolbar. You see active streams, which rule applies, and can close to tray or launch at login.
+**What it does:** Pick a default output, then define rules so specific apps (browsers, meetings, music players) always use the device you choose. The router runs inside the app; use **Start** / **Stop** in the toolbar. You see active streams, which rule applies, and can close to tray or launch at login.
+
+## Current UI highlights
+
+- **Devices tab status icons** - The **Status** column uses colored dots: green = connected, red = disconnected, gray = unknown.
+- **Active Streams quick route** - Route a selected stream to **Bluetooth**, **HDMI**, or **Analog speakers** with one click.
+- **Temporary vs Permanent** - Temporary keeps an in-memory override while the router is running; Permanent saves/updates a rule in config.
+- **Route column override label** - Active temporary overrides show as `Temporary override (<device>)` in the **Route** column.
+
+![SinkSwitch main window (Devices tab)](docs/flathub/main-window.png)
 
 ## Default routing (out of the box)
 
@@ -55,7 +64,7 @@ Use `./build-and-run.sh --clean` to remove the default build directory (`../sink
 Pushing a tag `v*` runs **Flatpak release**: builds `sinkswitch-<version>-x86_64.flatpak` and creates the GitHub release with that artifact.
 
 1. Bump **`src/_version.py`** and **`flatpak/...metainfo.xml`** `<release>` (or let CI rewrite metainfo + `_version.py` from the tag during the workflow).
-2. `git tag v0.7.19 && git push origin v0.7.19`
+2. `git tag v0.7.21 && git push origin v0.7.21`
 
 Run **Flatpak release** manually from the Actions tab (**workflow_dispatch**) to test the Flatpak build without creating a release.
 

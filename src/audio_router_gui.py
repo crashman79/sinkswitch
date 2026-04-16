@@ -143,11 +143,11 @@ try:
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QLabel, QListWidget, QListWidgetItem, QTextEdit,
         QSplitter, QGroupBox, QTabWidget, QTableWidget, QTableWidgetItem,
-        QHeaderView, QMessageBox, QFileDialog, QComboBox, QLineEdit,
+        QHeaderView, QMessageBox, QFileDialog, QComboBox, QLineEdit, QStyle,
         QDialog, QDialogButtonBox, QCheckBox, QScrollArea, QRadioButton, QButtonGroup
     )
-    from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QAction, QPalette, QImage
-    from PyQt6.QtCore import QTimer, Qt, QSize, QMargins, pyqtSignal, QThread, QSettings
+    from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QAction, QPalette, QImage, QPen, QPolygon
+    from PyQt6.QtCore import QTimer, Qt, QSize, QMargins, pyqtSignal, QThread, QSettings, QPoint, QRect
     from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
 except ImportError as e:
     logger.error(f"PyQt6 not available: {e}")
@@ -484,6 +484,7 @@ def _load_app_settings() -> Dict[str, Any]:
         "start_routing_on_launch": bool,
         "close_to_tray": bool,
         "theme": str,
+        "devices_streams_split_pct": int,
     }
     s = QSettings("io.github.crashman79", "sinkswitch")
     out: Dict[str, Any] = {}
@@ -530,6 +531,7 @@ def _save_app_settings(data: Dict[str, Any]) -> None:
         "start_routing_on_launch",
         "close_to_tray",
         "theme",
+        "devices_streams_split_pct",
     }
     s = QSettings("io.github.crashman79", "sinkswitch")
     s.beginGroup("prefs")
@@ -930,7 +932,10 @@ class AudioRouterGUI(QMainWindow):
         self.start_routing_on_launch = settings.get('start_routing_on_launch', True)
         self.close_to_tray = settings.get('close_to_tray', False)
         self.theme_setting = settings.get('theme', 'system')
+        self.devices_streams_split_pct = int(settings.get('devices_streams_split_pct', 50) or 50)
+        self.devices_streams_split_pct = max(20, min(80, self.devices_streams_split_pct))
         self._status_icon_cache: Dict[str, QIcon] = {}
+        self._device_type_icon_cache: Dict[str, QIcon] = {}
         self.monitor_thread: Optional[MonitorThread] = None
         self.device_thread = None
         self.stream_thread = None
@@ -1134,34 +1139,29 @@ class AudioRouterGUI(QMainWindow):
         tabs = QTabWidget()
         main_layout.addWidget(tabs)
         
-        # Tab 1: Devices
+        # Tab 1: Devices + Active Streams
         devices_tab = self.create_devices_tab()
-        tabs.addTab(devices_tab, "Devices")
+        tabs.addTab(devices_tab, "Devices & Streams")
         
         # Tab 2: Routing Rules
         rules_tab = self.create_rules_tab()
         tabs.addTab(rules_tab, "Routing Rules")
         
-        # Tab 3: Active Streams
-        streams_tab = self.create_streams_tab()
-        tabs.addTab(streams_tab, "Active Streams")
-        
-        # Tab 4: Logs
+        # Tab 3: Logs
         logs_tab = self.create_logs_tab()
         tabs.addTab(logs_tab, "Logs")
 
-        # Tab 5: Settings
+        # Tab 4: Settings
         settings_tab = self.create_settings_tab()
         tabs.addTab(settings_tab, "Settings")
 
-        # Tab 6: About
+        # Tab 5: About
         about_tab = self.create_about_tab()
         tabs.addTab(about_tab, "About")
 
         _tab_tips = [
-            "Sinks PipeWire/Pulse sees (Bluetooth, USB, built-in, HDMI)",
+            "Outputs and live streams in one place",
             "Per-app rules: which programs go to which output",
-            "Live playback streams and which rule applies",
             "In-app log buffer for troubleshooting",
             "Autostart, theme, tray, and optional binary install",
             "Version, config paths, and updates",
@@ -1173,17 +1173,18 @@ class AudioRouterGUI(QMainWindow):
         self.statusBar().showMessage("Ready")
     
     def create_devices_tab(self) -> QWidget:
-        """Create the devices tab"""
+        """Create a combined Devices + Active Streams tab."""
         widget = QWidget()
         layout = QVBoxLayout()
         widget.setLayout(layout)
-        
-        # Refresh button
+
+        devices_group = QGroupBox("Devices")
+        devices_layout = QVBoxLayout()
+
         refresh_btn = QPushButton("Refresh Devices")
         refresh_btn.clicked.connect(self.refresh_devices)
-        layout.addWidget(refresh_btn)
-        
-        # Devices table
+        devices_layout.addWidget(refresh_btn)
+
         self.devices_table = QTableWidget()
         self.devices_table.setColumnCount(4)
         self.devices_table.setHorizontalHeaderLabels(['Status', 'Name', 'Type', 'Device ID'])
@@ -1195,9 +1196,97 @@ class AudioRouterGUI(QMainWindow):
         self.devices_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.devices_table.setAlternatingRowColors(True)
         self.devices_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        layout.addWidget(self.devices_table)
+        devices_layout.addWidget(self.devices_table)
+        devices_group.setLayout(devices_layout)
+        layout.addWidget(devices_group, stretch=1)
+
+        streams_group = QGroupBox("Active Streams")
+        streams_layout = QVBoxLayout()
+
+        self.streams_table = QTableWidget()
+        self.streams_table.setColumnCount(3)
+        self.streams_table.setHorizontalHeaderLabels(['Application', 'Output device', 'Route'])
+        self.streams_table.setToolTip("Route = matching rule name, or Default when no rule applies")
+        self.streams_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.streams_table.setAlternatingRowColors(True)
+        self.streams_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.streams_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.streams_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.streams_table.itemSelectionChanged.connect(self._update_stream_route_buttons_state)
+        streams_layout.addWidget(self.streams_table)
+
+        route_controls_layout = QHBoxLayout()
+        route_controls_layout.addWidget(QLabel("Quick route selected stream:"))
+
+        self.route_mode_temp_radio = QRadioButton("Temporary")
+        self.route_mode_perm_radio = QRadioButton("Permanent")
+        self.route_mode_temp_radio.setChecked(True)
+        self.route_mode_group = QButtonGroup(self)
+        self.route_mode_group.addButton(self.route_mode_temp_radio)
+        self.route_mode_group.addButton(self.route_mode_perm_radio)
+        self.route_mode_temp_radio.setToolTip("Move only the currently selected active stream")
+        self.route_mode_perm_radio.setToolTip("Move stream now and save/update a routing rule for this app")
+        route_controls_layout.addWidget(self.route_mode_temp_radio)
+        route_controls_layout.addWidget(self.route_mode_perm_radio)
+
+        self.route_bt_btn = QPushButton("Bluetooth")
+        self.route_bt_btn.clicked.connect(lambda: self._on_quick_route_clicked('bluetooth'))
+        route_controls_layout.addWidget(self.route_bt_btn)
+
+        self.route_hdmi_btn = QPushButton("HDMI")
+        self.route_hdmi_btn.clicked.connect(lambda: self._on_quick_route_clicked('hdmi'))
+        route_controls_layout.addWidget(self.route_hdmi_btn)
+
+        self.route_analog_btn = QPushButton("Analog speakers")
+        self.route_analog_btn.clicked.connect(lambda: self._on_quick_route_clicked('analog_speakers'))
+        route_controls_layout.addWidget(self.route_analog_btn)
+
+        route_controls_layout.addStretch()
+        streams_layout.addLayout(route_controls_layout)
+        streams_group.setLayout(streams_layout)
+
+        self.devices_streams_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.devices_streams_splitter.addWidget(devices_group)
+        self.devices_streams_splitter.addWidget(streams_group)
+        self.devices_streams_splitter.setChildrenCollapsible(False)
+        self.devices_streams_splitter.setStretchFactor(0, 1)
+        self.devices_streams_splitter.setStretchFactor(1, 1)
+        self.devices_streams_splitter.splitterMoved.connect(self._on_devices_streams_splitter_moved)
+        layout.addWidget(self.devices_streams_splitter, stretch=1)
+
+        QTimer.singleShot(0, self._apply_devices_streams_splitter_ratio)
+        self._update_stream_route_buttons_state()
         
         return widget
+
+    def _apply_devices_streams_splitter_ratio(self):
+        splitter = getattr(self, 'devices_streams_splitter', None)
+        if splitter is None:
+            return
+        total = splitter.size().height()
+        if total <= 0:
+            total = 1000
+        top = max(120, int(total * self.devices_streams_split_pct / 100.0))
+        bottom = max(120, total - top)
+        splitter.setSizes([top, bottom])
+
+    def _on_devices_streams_splitter_moved(self, _pos: int, _index: int):
+        splitter = getattr(self, 'devices_streams_splitter', None)
+        if splitter is None:
+            return
+        sizes = splitter.sizes()
+        total = sum(sizes)
+        if total <= 0:
+            return
+        pct = int(round((sizes[0] / total) * 100))
+        pct = max(20, min(80, pct))
+        if pct == self.devices_streams_split_pct:
+            return
+        self.devices_streams_split_pct = pct
+        _save_app_settings({
+            **_load_app_settings(),
+            "devices_streams_split_pct": pct,
+        })
     
     def create_rules_tab(self) -> QWidget:
         """Create the routing rules tab"""
@@ -1374,19 +1463,17 @@ class AudioRouterGUI(QMainWindow):
         self.close_to_tray_check.setChecked(self.close_to_tray)
         self.close_to_tray_check.setToolTip("When enabled, closing the window hides the app to the tray; use tray menu to Show or Quit.")
         left_col.addWidget(self.close_to_tray_check)
-        left_col.addStretch()
-        main_layout.addLayout(left_col)
 
-        right_col = QVBoxLayout()
         btn_row = QHBoxLayout()
         apply_btn = QPushButton("Apply and save")
         apply_btn.setMaximumWidth(140)
         apply_btn.clicked.connect(self.apply_settings)
         btn_row.addWidget(apply_btn)
         btn_row.addStretch()
-        right_col.addLayout(btn_row)
-        right_col.addStretch()
-        main_layout.addLayout(right_col)
+        left_col.addLayout(btn_row)
+
+        left_col.addStretch()
+        main_layout.addLayout(left_col)
         return widget
 
     def create_about_tab(self) -> QWidget:
@@ -1665,8 +1752,13 @@ class AudioRouterGUI(QMainWindow):
             self.devices_table.setItem(i, 1, QTableWidgetItem(display_name))
             # Device type
             device_type = device.get('device_type', 'unknown')
-            type_icon = self.get_device_type_icon(device_type)
-            self.devices_table.setItem(i, 2, QTableWidgetItem(f"{type_icon} {device_type}"))
+            type_label = self.get_device_type_label(device_type)
+            type_item = QTableWidgetItem()
+            type_item.setText(type_label)
+            type_item.setIcon(self.get_device_type_icon(device_type))
+            type_item.setToolTip(type_label)
+            type_item.setTextAlignment(int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft))
+            self.devices_table.setItem(i, 2, type_item)
             # Device ID (internal sink name)
             raw_id = device.get('id') or ''
             device_id = raw_id[:50] + '...' if len(raw_id) > 50 else raw_id
@@ -1934,18 +2026,197 @@ class AudioRouterGUI(QMainWindow):
                 self.monitor_thread.set_temporary_route(app_name, target_id)
             self.statusBar().showMessage(f"Moved {app_name} to {target_label} (temporary)", 3500)
     
-    def get_device_type_icon(self, device_type: str) -> str:
-        """Get short ASCII marker for device type."""
-        icons = {
-            'bluetooth': 'BT',
-            'bluetooth_earbuds': 'HS',
-            'usb_headset': 'HS',
-            'usb_speakers': 'SPK',
-            'analog_speakers': 'SPK',
-            'hdmi': 'HDMI',
-            'unknown': '?'
+    def get_device_type_icon(self, device_type: str) -> QIcon:
+        """Get themed icon for a device type in the Devices list."""
+        normalized_type = (device_type or 'unknown').lower()
+        theme_variant = self._icon_theme_variant()
+        cache_key = f"{normalized_type}:{theme_variant}"
+        cached = self._device_type_icon_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        custom_icon_builders = {
+            'bluetooth': self._make_bluetooth_icon,
+            'bluetooth_earbuds': self._make_bluetooth_icon,
+            'usb_speakers': self._make_speaker_icon,
+            'analog_speakers': self._make_speaker_icon,
+            'usb_headset': self._make_headset_icon,
         }
-        return icons.get(device_type, 'SPK')
+        custom_builder = custom_icon_builders.get(normalized_type)
+        if custom_builder is not None:
+            icon = custom_builder()
+            self._device_type_icon_cache[cache_key] = icon
+            return icon
+
+        icon_candidates = {
+            # Prefer non-symbolic icons first so they stay visible across themes.
+            'bluetooth': ['bluetooth', 'bluetooth-active', 'bluetooth-active-symbolic'],
+            'bluetooth_earbuds': ['bluetooth', 'audio-headphones-bluetooth', 'audio-headphones-bluetooth-symbolic'],
+            'usb_headset': ['audio-headset', 'audio-headphones', 'audio-headset-symbolic'],
+            'usb_speakers': ['audio-speakers', 'audio-card', 'audio-speakers-symbolic'],
+            'analog_speakers': ['audio-speakers', 'audio-card', 'audio-speakers-symbolic'],
+            'hdmi': ['video-display', 'computer', 'video-display-symbolic', 'audio-card'],
+            'unknown': ['audio-card', 'audio-card-symbolic'],
+        }
+
+        icon = QIcon()
+        for icon_name in icon_candidates.get(normalized_type, icon_candidates['unknown']):
+            icon = QIcon.fromTheme(icon_name)
+            if not icon.isNull():
+                break
+
+        if icon.isNull():
+            icon = self._make_generic_audio_icon()
+
+        self._device_type_icon_cache[cache_key] = icon
+        return icon
+
+    def _icon_theme_variant(self) -> str:
+        """Return dark/light variant based on current window palette."""
+        bg = self.palette().color(QPalette.ColorRole.Window)
+        return 'dark' if bg.lightness() < 128 else 'light'
+
+    def _icon_colors(self, kind: str) -> Dict[str, QColor]:
+        """Pick high-contrast icon colors for current light/dark theme."""
+        dark_theme = self._icon_theme_variant() == 'dark'
+        if kind == 'bluetooth':
+            if dark_theme:
+                return {
+                    'primary': QColor(147, 197, 253),
+                    'accent': QColor(219, 234, 254),
+                }
+            return {
+                'primary': QColor(30, 64, 175),
+                'accent': QColor(59, 130, 246),
+            }
+        if kind == 'speaker':
+            if dark_theme:
+                return {
+                    'body': QColor(125, 211, 252),
+                    'wave': QColor(224, 242, 254),
+                }
+            return {
+                'body': QColor(8, 145, 178),
+                'wave': QColor(14, 116, 144),
+            }
+        if kind == 'headset':
+            if dark_theme:
+                return {
+                    'primary': QColor(134, 239, 172),
+                    'accent': QColor(220, 252, 231),
+                }
+            return {
+                'primary': QColor(21, 128, 61),
+                'accent': QColor(22, 163, 74),
+            }
+        if dark_theme:
+            return {
+                'primary': QColor(203, 213, 225),
+                'accent': QColor(241, 245, 249),
+            }
+        return {
+            'primary': QColor(71, 85, 105),
+            'accent': QColor(100, 116, 139),
+        }
+
+    def _make_bluetooth_icon(self) -> QIcon:
+        """Draw a bright Bluetooth rune-like icon independent of icon theme."""
+        colors = self._icon_colors('bluetooth')
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(colors['primary'], 2)
+        painter.setPen(pen)
+        painter.drawLine(8, 2, 8, 14)
+        painter.drawLine(8, 2, 12, 5)
+        painter.drawLine(12, 5, 8, 8)
+        painter.drawLine(8, 8, 12, 11)
+        painter.drawLine(12, 11, 8, 14)
+        painter.drawLine(8, 8, 4, 5)
+        painter.drawLine(8, 8, 4, 11)
+        # Bright center stroke improves readability on busy backgrounds.
+        painter.setPen(QPen(colors['accent'], 1))
+        painter.drawLine(8, 3, 8, 13)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _make_speaker_icon(self) -> QIcon:
+        """Draw a bright speaker icon with sound waves."""
+        colors = self._icon_colors('speaker')
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(colors['body'])
+        speaker = QPolygon([
+            QPoint(2, 6),
+            QPoint(5, 6),
+            QPoint(8, 3),
+            QPoint(8, 13),
+            QPoint(5, 10),
+            QPoint(2, 10),
+        ])
+        painter.drawPolygon(speaker)
+
+        wave_pen = QPen(colors['wave'], 2)
+        painter.setPen(wave_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawArc(QRect(7, 5, 5, 6), -35 * 16, 70 * 16)
+        painter.drawArc(QRect(8, 3, 7, 10), -35 * 16, 70 * 16)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _make_headset_icon(self) -> QIcon:
+        """Draw a bright headset icon."""
+        colors = self._icon_colors('headset')
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        pen = QPen(colors['primary'], 2)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawArc(QRect(3, 2, 10, 8), 0, 180 * 16)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(colors['accent'])
+        painter.drawRoundedRect(2, 8, 3, 5, 1, 1)
+        painter.drawRoundedRect(11, 8, 3, 5, 1, 1)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _make_generic_audio_icon(self) -> QIcon:
+        """Draw a neutral fallback audio icon that stays visible."""
+        colors = self._icon_colors('generic')
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(colors['primary'])
+        painter.drawRoundedRect(2, 3, 12, 10, 2, 2)
+        painter.setBrush(colors['accent'])
+        painter.drawEllipse(6, 6, 4, 4)
+        painter.end()
+        return QIcon(pixmap)
+
+    def get_device_type_label(self, device_type: str) -> str:
+        """Get human-readable device type label for tooltips."""
+        normalized_type = (device_type or 'unknown').lower()
+        labels = {
+            'bluetooth': 'Bluetooth',
+            'bluetooth_earbuds': 'Bluetooth earbuds',
+            'usb_headset': 'USB headset',
+            'usb_speakers': 'USB speakers',
+            'analog_speakers': 'Analog speakers',
+            'hdmi': 'HDMI',
+            'unknown': 'Unknown',
+        }
+        return labels.get(normalized_type, normalized_type.replace('_', ' ').title())
     
     def _router_running(self) -> bool:
         return self.monitor_thread is not None and self.monitor_thread.isRunning()
