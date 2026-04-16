@@ -261,6 +261,44 @@ class MonitorThread(QThread):
         super().__init__()
         self.config_file = config_file
         self.stop_event = threading.Event()
+        self._temporary_routes: Dict[str, str] = {}
+        self._temporary_routes_lock = threading.Lock()
+
+    def set_temporary_route(self, app_name: str, target_device: str) -> None:
+        key = (app_name or '').strip().lower()
+        if not key or key == 'unknown' or not target_device:
+            return
+        with self._temporary_routes_lock:
+            self._temporary_routes[key] = target_device
+
+    def clear_temporary_route(self, app_name: str) -> None:
+        key = (app_name or '').strip().lower()
+        if not key:
+            return
+        with self._temporary_routes_lock:
+            self._temporary_routes.pop(key, None)
+
+    def get_temporary_route(self, app_name: str) -> Optional[str]:
+        key = (app_name or '').strip().lower()
+        if not key:
+            return None
+        with self._temporary_routes_lock:
+            return self._temporary_routes.get(key)
+
+    def _temporary_rules(self) -> List[Dict]:
+        with self._temporary_routes_lock:
+            items = list(self._temporary_routes.items())
+        out: List[Dict] = []
+        for app_key, target_device in items:
+            out.append({
+                'name': f"Temporary route: {app_key}",
+                'applications': [app_key],
+                'application_keywords': [],
+                'target_device': target_device,
+                'target_device_variants': [target_device],
+                'enable_default_fallback': True,
+            })
+        return out
 
     def run(self):
         try:
@@ -284,7 +322,8 @@ class MonitorThread(QThread):
                     logger.error(f"Failed to regenerate config: {e}")
 
             def apply_rules():
-                results = engine.apply_rules(rules_ref)
+                effective_rules = list(rules_ref) + self._temporary_rules()
+                results = engine.apply_rules(effective_rules)
                 for r in results:
                     if r.get('success') and r.get('routed_count', 0) > 0:
                         self.routing_notification.emit(
@@ -870,6 +909,7 @@ class AudioRouterGUI(QMainWindow):
         self.config_file = self.config_base / 'config' / 'routing_rules.yaml'
         self.devices: List[Dict] = []
         self.rules: List[Dict] = []
+        self.current_streams: List[Dict] = []
 
         # Bootstrap config on first run
         if not self.config_file.exists():
@@ -890,6 +930,7 @@ class AudioRouterGUI(QMainWindow):
         self.start_routing_on_launch = settings.get('start_routing_on_launch', True)
         self.close_to_tray = settings.get('close_to_tray', False)
         self.theme_setting = settings.get('theme', 'system')
+        self._status_icon_cache: Dict[str, QIcon] = {}
         self.monitor_thread: Optional[MonitorThread] = None
         self.device_thread = None
         self.stream_thread = None
@@ -1146,9 +1187,9 @@ class AudioRouterGUI(QMainWindow):
         self.devices_table = QTableWidget()
         self.devices_table.setColumnCount(4)
         self.devices_table.setHorizontalHeaderLabels(['Status', 'Name', 'Type', 'Device ID'])
-        self.devices_table.setToolTip("Status shows [ON]/[OFF]; Name = friendly name; Device ID = internal sink name used for routing")
+        self.devices_table.setToolTip("Status icon: green=connected, red=disconnected, gray=unknown")
         self.devices_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.devices_table.setColumnWidth(0, 56)
+        self.devices_table.setColumnWidth(0, 72)
         self.devices_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.devices_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.devices_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
@@ -1219,7 +1260,40 @@ class AudioRouterGUI(QMainWindow):
         self.streams_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.streams_table.setAlternatingRowColors(True)
         self.streams_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.streams_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.streams_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.streams_table.itemSelectionChanged.connect(self._update_stream_route_buttons_state)
         layout.addWidget(self.streams_table)
+
+        route_controls_layout = QHBoxLayout()
+        route_controls_layout.addWidget(QLabel("Quick route selected stream:"))
+
+        self.route_mode_temp_radio = QRadioButton("Temporary")
+        self.route_mode_perm_radio = QRadioButton("Permanent")
+        self.route_mode_temp_radio.setChecked(True)
+        self.route_mode_group = QButtonGroup(self)
+        self.route_mode_group.addButton(self.route_mode_temp_radio)
+        self.route_mode_group.addButton(self.route_mode_perm_radio)
+        self.route_mode_temp_radio.setToolTip("Move only the currently selected active stream")
+        self.route_mode_perm_radio.setToolTip("Move stream now and save/update a routing rule for this app")
+        route_controls_layout.addWidget(self.route_mode_temp_radio)
+        route_controls_layout.addWidget(self.route_mode_perm_radio)
+
+        self.route_bt_btn = QPushButton("Bluetooth")
+        self.route_bt_btn.clicked.connect(lambda: self._on_quick_route_clicked('bluetooth'))
+        route_controls_layout.addWidget(self.route_bt_btn)
+
+        self.route_hdmi_btn = QPushButton("HDMI")
+        self.route_hdmi_btn.clicked.connect(lambda: self._on_quick_route_clicked('hdmi'))
+        route_controls_layout.addWidget(self.route_hdmi_btn)
+
+        self.route_analog_btn = QPushButton("Analog speakers")
+        self.route_analog_btn.clicked.connect(lambda: self._on_quick_route_clicked('analog_speakers'))
+        route_controls_layout.addWidget(self.route_analog_btn)
+
+        route_controls_layout.addStretch()
+        layout.addLayout(route_controls_layout)
+        self._update_stream_route_buttons_state()
         
         return widget
     
@@ -1578,13 +1652,14 @@ class AudioRouterGUI(QMainWindow):
         self.devices = devices
         self.devices_table.setRowCount(len(devices))
         self._refresh_default_sink_combo()
+        self._update_stream_route_buttons_state()
         # Refresh rules table so Target Device column shows friendly names now that we have devices
         self.update_rules_table()
         
         for i, device in enumerate(devices):
             # Status indicator
-            status_icon = "[ON]" if device.get('connected') else "[OFF]"
-            self.devices_table.setItem(i, 0, QTableWidgetItem(status_icon))
+            status_item = self._device_status_item(device.get('connected'))
+            self.devices_table.setItem(i, 0, status_item)
             # Friendly name (fallback to name/id)
             display_name = device.get('friendly_name') or device.get('name') or device.get('id', '')
             self.devices_table.setItem(i, 1, QTableWidgetItem(display_name))
@@ -1596,6 +1671,48 @@ class AudioRouterGUI(QMainWindow):
             raw_id = device.get('id') or ''
             device_id = raw_id[:50] + '...' if len(raw_id) > 50 else raw_id
             self.devices_table.setItem(i, 3, QTableWidgetItem(device_id))
+
+    def _status_dot_icon(self, status_key: str) -> QIcon:
+        cached = self._status_icon_cache.get(status_key)
+        if cached is not None:
+            return cached
+
+        color_map = {
+            'connected': QColor(34, 197, 94),
+            'disconnected': QColor(239, 68, 68),
+            'unknown': QColor(148, 163, 184),
+        }
+        color = color_map.get(status_key, color_map['unknown'])
+        size = QSize(14, 14)
+        pixmap = QPixmap(size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawEllipse(1, 1, 12, 12)
+        painter.end()
+
+        icon = QIcon(pixmap)
+        self._status_icon_cache[status_key] = icon
+        return icon
+
+    def _device_status_item(self, connected: Optional[bool]) -> QTableWidgetItem:
+        if connected is True:
+            status_key = 'connected'
+            status_text = 'Connected'
+        elif connected is False:
+            status_key = 'disconnected'
+            status_text = 'Disconnected'
+        else:
+            status_key = 'unknown'
+            status_text = 'Unknown'
+
+        item = QTableWidgetItem()
+        item.setIcon(self._status_dot_icon(status_key))
+        item.setToolTip(status_text)
+        item.setTextAlignment(int(Qt.AlignmentFlag.AlignCenter))
+        return item
     
     def _get_sink_index_to_name(self) -> Dict[str, str]:
         """Return dict sink_index -> sink_name from pactl list sinks short."""
@@ -1633,6 +1750,7 @@ class AudioRouterGUI(QMainWindow):
 
     def update_streams(self, streams: List[Dict]):
         """Update active streams table: app, output device (friendly), route (rule or Default)."""
+        self.current_streams = streams
         sink_index_to_name = self._get_sink_index_to_name()
         default_sink_name = DeviceMonitor().get_default_sink() or ''
         self.streams_table.setRowCount(len(streams))
@@ -1654,14 +1772,167 @@ class AudioRouterGUI(QMainWindow):
                 out_label = sink_name or 'Unknown'
             self.streams_table.setItem(i, 1, QTableWidgetItem(out_label))
             # Route: matching rule name or fallback status for unmatched streams.
+            temporary_target_id = None
+            if self.monitor_thread and self.monitor_thread.isRunning():
+                temporary_target_id = self.monitor_thread.get_temporary_route(app_name)
             rule = self._rule_for_app(app_name)
-            if rule:
+            if temporary_target_id:
+                temp_device = next((d for d in self.devices if d.get('id') == temporary_target_id), None)
+                temp_label = (temp_device.get('friendly_name') or temp_device.get('name')) if temp_device else temporary_target_id
+                route_label = f"Temporary override ({temp_label})"
+            elif rule:
                 route_label = rule.get('name', 'Default')
             elif sink_name and default_sink_name and sink_name != default_sink_name:
                 route_label = 'Unmatched (not on default)'
             else:
                 route_label = 'Default'
             self.streams_table.setItem(i, 2, QTableWidgetItem(route_label))
+        self._update_stream_route_buttons_state()
+
+    def _find_quick_route_target(self, target_type: str) -> Optional[Dict]:
+        """Return a connected output device suitable for quick route target_type."""
+        target_types = {
+            'bluetooth': {'bluetooth', 'bluetooth_earbuds'},
+            'hdmi': {'hdmi'},
+            'analog_speakers': {'analog_speakers'},
+        }.get(target_type, {target_type})
+        candidates = [
+            d for d in self.devices
+            if d.get('device_type') in target_types and d.get('id')
+        ]
+        for d in candidates:
+            if d.get('connected'):
+                return d
+        return None
+
+    def _selected_stream(self) -> Optional[Dict]:
+        row = self.streams_table.currentRow()
+        if row < 0 or row >= len(self.current_streams):
+            return None
+        return self.current_streams[row]
+
+    def _update_stream_route_buttons_state(self):
+        if not hasattr(self, 'route_bt_btn'):
+            return
+        selected = self._selected_stream() is not None
+        bt = self._find_quick_route_target('bluetooth')
+        hdmi = self._find_quick_route_target('hdmi')
+        analog = self._find_quick_route_target('analog_speakers')
+
+        self.route_bt_btn.setEnabled(selected and bt is not None)
+        self.route_hdmi_btn.setEnabled(selected and hdmi is not None)
+        self.route_analog_btn.setEnabled(selected and analog is not None)
+
+        self.route_bt_btn.setToolTip(
+            f"Route selected stream to {(bt.get('friendly_name') or bt.get('name') or bt.get('id'))}"
+            if bt else "No connected Bluetooth output found"
+        )
+        self.route_hdmi_btn.setToolTip(
+            f"Route selected stream to {(hdmi.get('friendly_name') or hdmi.get('name') or hdmi.get('id'))}"
+            if hdmi else "No connected HDMI output found"
+        )
+        self.route_analog_btn.setToolTip(
+            f"Route selected stream to {(analog.get('friendly_name') or analog.get('name') or analog.get('id'))}"
+            if analog else "No connected analog speakers output found"
+        )
+
+    def _save_rules_silent(self) -> bool:
+        try:
+            self.config_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.config_file, 'w') as f:
+                yaml.dump({'routing_rules': self.rules}, f, default_flow_style=False, sort_keys=False)
+            return True
+        except Exception as e:
+            logger.error(f"Error saving config: {e}")
+            return False
+
+    def _upsert_quick_route_rule(self, app_name: str, target_device_id: str):
+        app_name = (app_name or '').strip()
+        if not app_name or app_name.lower() == 'unknown':
+            raise ValueError("Cannot create permanent route for an unknown application")
+
+        app_lower = app_name.lower()
+        for rule in self.rules:
+            apps = rule.get('applications', []) or []
+            if any(isinstance(a, str) and a.lower() == app_lower for a in apps):
+                rule['target_device'] = target_device_id
+                rule['target_device_variants'] = [target_device_id]
+                return
+
+        existing_names = {r.get('name', '') for r in self.rules}
+        base_name = f"Quick route: {app_name}"
+        name = base_name
+        idx = 2
+        while name in existing_names:
+            name = f"{base_name} ({idx})"
+            idx += 1
+
+        self.rules.append({
+            'name': name,
+            'applications': [app_name],
+            'application_keywords': [],
+            'target_device': target_device_id,
+            'target_device_variants': [target_device_id],
+            'enable_default_fallback': True,
+        })
+
+    def _on_quick_route_clicked(self, target_type: str):
+        stream = self._selected_stream()
+        if not stream:
+            self.statusBar().showMessage("Select a stream first", 2500)
+            return
+
+        target = self._find_quick_route_target(target_type)
+        if not target:
+            self.statusBar().showMessage("No connected output found for that quick route", 3000)
+            return
+
+        sink_input_id = stream.get('id')
+        target_id = target.get('id')
+        target_label = target.get('friendly_name') or target.get('name') or target_id
+        if not sink_input_id or not target_id:
+            self.statusBar().showMessage("Selected stream or output is missing required data", 3000)
+            return
+
+        move_res = subprocess.run(
+            host_cmd(['pactl', 'move-sink-input', str(sink_input_id), str(target_id)]),
+            capture_output=True,
+            text=True,
+            timeout=3,
+            **SUBPROCESS_TEXT_KW,
+        )
+        if move_res.returncode != 0:
+            self.statusBar().showMessage("Failed to move stream to selected output", 3500)
+            return
+
+        app_name = (
+            stream.get('application_name')
+            or stream.get('application.name')
+            or stream.get('media.name')
+            or stream.get('node.name')
+            or 'Unknown'
+        )
+
+        if self.route_mode_perm_radio.isChecked():
+            try:
+                self._upsert_quick_route_rule(app_name, target_id)
+                self.update_rules_table()
+                if not self._save_rules_silent():
+                    QMessageBox.warning(self, "Save failed", "Stream moved, but could not save permanent route")
+                    self.statusBar().showMessage(f"Moved {app_name} to {target_label} (not saved)", 4500)
+                    return
+                if self.monitor_thread and self.monitor_thread.isRunning():
+                    self.monitor_thread.clear_temporary_route(app_name)
+                if self._router_running():
+                    self.restart_service()
+                self.statusBar().showMessage(f"Moved {app_name} to {target_label} and saved permanent route", 4500)
+            except ValueError as e:
+                QMessageBox.information(self, "Permanent route", str(e))
+                self.statusBar().showMessage(f"Moved stream to {target_label} (temporary only)", 4500)
+        else:
+            if self.monitor_thread and self.monitor_thread.isRunning():
+                self.monitor_thread.set_temporary_route(app_name, target_id)
+            self.statusBar().showMessage(f"Moved {app_name} to {target_label} (temporary)", 3500)
     
     def get_device_type_icon(self, device_type: str) -> str:
         """Get short ASCII marker for device type."""
