@@ -64,7 +64,7 @@ Use `./build-and-run.sh --clean` to remove the default build directory (`../sink
 Pushing a tag `v*` runs **Flatpak release**: builds `sinkswitch-<version>-x86_64.flatpak` and creates the GitHub release with that artifact.
 
 1. Bump **`src/_version.py`** and **`flatpak/...metainfo.xml`** `<release>` (or let CI rewrite metainfo + `_version.py` from the tag during the workflow).
-2. `git tag v0.7.21 && git push origin v0.7.21`
+2. `git tag v0.8.1 && git push origin v0.8.1`
 
 Run **Flatpak release** manually from the Actions tab (**workflow_dispatch**) to test the Flatpak build without creating a release.
 

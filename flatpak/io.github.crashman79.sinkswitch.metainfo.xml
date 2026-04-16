@@ -25,10 +25,18 @@
   <screenshots>
     <screenshot type="default">
       <image>https://raw.githubusercontent.com/crashman79/sinkswitch/main/docs/flathub/main-window.png</image>
-      <caption>SinkSwitch Devices tab with live device status indicators</caption>
+      <caption>Main view with devices, active streams, and quick route controls</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/crashman79/sinkswitch/main/docs/flathub/rules.png</image>
+      <caption>Routing Rules editor and saved per-app routes</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/crashman79/sinkswitch/main/docs/flathub/settings.png</image>
+      <caption>Settings for startup, theme, and tray behavior</caption>
     </screenshot>
   </screenshots>
   <releases>
-    <release version="0.7.21" date="2026-04-16"/>
+    <release version="0.8.1" date="2026-04-16"/>
   </releases>
 </component>
