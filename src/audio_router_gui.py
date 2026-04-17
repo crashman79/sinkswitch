@@ -310,16 +310,12 @@ class MonitorThread(QThread):
 
             def regenerate_and_reload():
                 try:
-                    logger.info("Regenerating routing configuration...")
-                    router = IntelligentAudioRouter()
-                    config = router.generate_routing_config()
-                    self.config_file.parent.mkdir(parents=True, exist_ok=True)
-                    with open(self.config_file, 'w') as f:
-                        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-                    rules_ref[:] = ConfigParser(str(self.config_file)).parse()
+                    logger.info("Reloading routing configuration after device change...")
+                    reloaded_rules = ConfigParser(str(self.config_file)).parse()
+                    rules_ref[:] = reloaded_rules
                     engine.apply_rules(rules_ref)
                 except Exception as e:
-                    logger.error(f"Failed to regenerate config: {e}")
+                    logger.error(f"Failed to reload config: {e}")
 
             def apply_rules():
                 effective_rules = list(rules_ref) + self._temporary_rules()

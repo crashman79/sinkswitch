@@ -114,21 +114,9 @@ def monitor_devices(config_file: str):
         engine = AudioRouterEngine()
         
         def regenerate_and_reload_config():
-            """Regenerate config and reload rules"""
+            """Reload existing config and rules after device changes."""
             try:
-                logger.info("Regenerating routing configuration...")
-                router = IntelligentAudioRouter()
-                config = router.generate_routing_config()
-                
-                # Save config
-                config_path = Path(config_file).resolve()
-                config_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(config_path, 'w') as f:
-                    import yaml
-                    yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-                
-                logger.info(f"Config regenerated and saved to {config_path}")
-                
+                logger.info("Reloading routing configuration after device change...")
                 # Reload rules
                 nonlocal parser, rules
                 parser = ConfigParser(config_file)
@@ -139,10 +127,10 @@ def monitor_devices(config_file: str):
                 engine.apply_rules(rules)
                 
             except Exception as e:
-                logger.error(f"Failed to regenerate config: {e}")
+                logger.error(f"Failed to reload config: {e}")
         
         print(f"Starting device monitoring with config: {config_file}")
-        print("Auto-regeneration enabled for bluetooth/USB device changes")
+        print("Auto-reload enabled for bluetooth/USB device changes")
         print("Press Ctrl+C to stop\n")
         
         monitor.watch_devices(
