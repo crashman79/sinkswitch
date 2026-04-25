@@ -257,9 +257,16 @@ class MonitorThread(QThread):
     """Runs the audio router monitor loop in the background (in-app mode)."""
     routing_notification = pyqtSignal(str, str)  # title, message
 
-    def __init__(self, config_file: Path):
+    def __init__(
+        self,
+        config_file: Path,
+        auto_mono_single_channel_bluetooth: bool = True,
+        force_bluetooth_mono: bool = False,
+    ):
         super().__init__()
         self.config_file = config_file
+        self.auto_mono_single_channel_bluetooth = auto_mono_single_channel_bluetooth
+        self.force_bluetooth_mono = force_bluetooth_mono
         self.stop_event = threading.Event()
         self._temporary_routes: Dict[str, str] = {}
         self._temporary_routes_lock = threading.Lock()
@@ -306,7 +313,10 @@ class MonitorThread(QThread):
             parser = ConfigParser(str(self.config_file))
             rules_ref[:] = parser.parse()
             monitor = DeviceMonitor()
-            engine = AudioRouterEngine()
+            engine = AudioRouterEngine(
+                auto_mono_single_channel_bluetooth=self.auto_mono_single_channel_bluetooth,
+                force_bluetooth_mono=self.force_bluetooth_mono,
+            )
 
             def regenerate_and_reload():
                 try:
@@ -479,6 +489,8 @@ def _load_app_settings() -> Dict[str, Any]:
         "start_minimized_at_login": bool,
         "start_routing_on_launch": bool,
         "close_to_tray": bool,
+        "auto_mono_single_channel_bluetooth": bool,
+        "force_bluetooth_mono": bool,
         "theme": str,
         "devices_streams_split_pct": int,
     }
@@ -526,6 +538,8 @@ def _save_app_settings(data: Dict[str, Any]) -> None:
         "start_minimized_at_login",
         "start_routing_on_launch",
         "close_to_tray",
+        "auto_mono_single_channel_bluetooth",
+        "force_bluetooth_mono",
         "theme",
         "devices_streams_split_pct",
     }
@@ -927,6 +941,8 @@ class AudioRouterGUI(QMainWindow):
         self._portal_login_snapshot = (self.login_autostart, self.start_minimized_at_login)
         self.start_routing_on_launch = settings.get('start_routing_on_launch', True)
         self.close_to_tray = settings.get('close_to_tray', False)
+        self.auto_mono_single_channel_bluetooth = settings.get('auto_mono_single_channel_bluetooth', True)
+        self.force_bluetooth_mono = settings.get('force_bluetooth_mono', False)
         self.theme_setting = settings.get('theme', 'system')
         self.devices_streams_split_pct = int(settings.get('devices_streams_split_pct', 50) or 50)
         self.devices_streams_split_pct = max(20, min(80, self.devices_streams_split_pct))
@@ -1117,6 +1133,13 @@ class AudioRouterGUI(QMainWindow):
         self.default_sink_combo.setToolTip("Sink used for apps that don't match any rule. New streams go here.")
         self.default_sink_combo.currentIndexChanged.connect(self._on_default_sink_changed)
         toolbar_layout.addWidget(self.default_sink_combo)
+
+        self.force_mono_btn = QPushButton()
+        self.force_mono_btn.setCheckable(True)
+        self.force_mono_btn.setChecked(self.force_bluetooth_mono)
+        self.force_mono_btn.toggled.connect(self._on_force_mono_toggled)
+        self._update_force_mono_button()
+        toolbar_layout.addWidget(self.force_mono_btn)
         
         toolbar_layout.addStretch()
         
@@ -1460,6 +1483,15 @@ class AudioRouterGUI(QMainWindow):
         self.close_to_tray_check.setToolTip("When enabled, closing the window hides the app to the tray; use tray menu to Show or Quit.")
         left_col.addWidget(self.close_to_tray_check)
 
+        self.auto_mono_single_channel_bluetooth_check = QCheckBox(
+            "Auto-mono for single-earbud Bluetooth (keep stereo when both channels are available)"
+        )
+        self.auto_mono_single_channel_bluetooth_check.setChecked(self.auto_mono_single_channel_bluetooth)
+        self.auto_mono_single_channel_bluetooth_check.setToolTip(
+            "When enabled, SinkSwitch detects one-channel Bluetooth outputs and mixes stereo to mono."
+        )
+        left_col.addWidget(self.auto_mono_single_channel_bluetooth_check)
+
         btn_row = QHBoxLayout()
         apply_btn = QPushButton("Apply and save")
         apply_btn.setMaximumWidth(140)
@@ -1625,12 +1657,17 @@ class AudioRouterGUI(QMainWindow):
         start_minimized_at_login = self.start_minimized_at_login_check.isChecked()
         start_routing = self.start_routing_check.isChecked()
         close_to_tray = self.close_to_tray_check.isChecked()
+        auto_mono_single_channel_bluetooth = self.auto_mono_single_channel_bluetooth_check.isChecked()
         theme_map = {0: "system", 1: "light", 2: "dark"}
         theme = theme_map.get(self.theme_combo.currentIndex(), "system")
+        mono_changed = (
+            auto_mono_single_channel_bluetooth != self.auto_mono_single_channel_bluetooth
+        )
         self.login_autostart = login_autostart
         self.start_minimized_at_login = start_minimized_at_login
         self.start_routing_on_launch = start_routing
         self.close_to_tray = close_to_tray
+        self.auto_mono_single_channel_bluetooth = auto_mono_single_channel_bluetooth
         self.theme_setting = theme
         _save_app_settings({
             **_load_app_settings(),
@@ -1638,6 +1675,8 @@ class AudioRouterGUI(QMainWindow):
             "start_minimized_at_login": start_minimized_at_login,
             'start_routing_on_launch': start_routing,
             'close_to_tray': close_to_tray,
+            'auto_mono_single_channel_bluetooth': auto_mono_single_channel_bluetooth,
+            'force_bluetooth_mono': self.force_bluetooth_mono,
             'theme': theme,
         })
         # Defer palette apply to next event loop to avoid re-entrancy crash in Qt
@@ -1645,6 +1684,10 @@ class AudioRouterGUI(QMainWindow):
         if app:
             QTimer.singleShot(0, lambda: _apply_theme(app, theme))
         self.update_service_status()
+
+        if mono_changed and self._router_running():
+            self.restart_service()
+            self.statusBar().showMessage("Router restarted to apply mono routing setting", 3000)
 
         pair = (login_autostart, start_minimized_at_login)
         if os.environ.get("FLATPAK_ID"):
@@ -1666,6 +1709,8 @@ class AudioRouterGUI(QMainWindow):
                             "start_minimized_at_login": self._portal_login_snapshot[1],
                             "start_routing_on_launch": self.start_routing_on_launch,
                             "close_to_tray": self.close_to_tray,
+                            "auto_mono_single_channel_bluetooth": self.auto_mono_single_channel_bluetooth,
+                            "force_bluetooth_mono": self.force_bluetooth_mono,
                             "theme": self.theme_setting,
                         })
                         QMessageBox.warning(self, "Login autostart", msg)
@@ -1730,16 +1775,66 @@ class AudioRouterGUI(QMainWindow):
             self.restart_service()
             self.statusBar().showMessage("Default output updated; router restarted", 2000)
 
+    def _is_internal_remap_sink_id(self, sink_id: str) -> bool:
+        sink = sink_id or ''
+        return sink.startswith('sinkswitch_mono.')
+
+    def _normalize_mono_master_sink(self, sink_name: str) -> str:
+        """Unwrap nested mono remap sink names to the underlying master sink name."""
+        out = sink_name or ''
+        while out.startswith('sinkswitch_mono.'):
+            out = out[len('sinkswitch_mono.'):]
+        return out
+
+    def _is_internal_remap_stream(self, stream: Dict) -> bool:
+        app_name = (stream.get('application_name') or stream.get('application.name') or '').lower()
+        media_name = (stream.get('media.name') or '').lower()
+        node_name = (stream.get('node.name') or '').lower()
+        if app_name.startswith('sinkswitch_mono.'):
+            return True
+        if 'sinkswitch_mono.' in node_name:
+            return True
+        if media_name.startswith('remapped ') and ' sink output' in media_name:
+            return True
+        return False
+
+    def _update_force_mono_button(self):
+        if self.force_bluetooth_mono:
+            self.force_mono_btn.setText("Force Mono: ON")
+            self.force_mono_btn.setToolTip(
+                "Force Bluetooth streams to mono remap even when sink reports stereo"
+            )
+        else:
+            self.force_mono_btn.setText("Force Mono: OFF")
+            self.force_mono_btn.setToolTip("Use automatic mono detection only")
+
+    def _on_force_mono_toggled(self, checked: bool):
+        self.force_bluetooth_mono = bool(checked)
+        self._update_force_mono_button()
+        _save_app_settings({
+            **_load_app_settings(),
+            'force_bluetooth_mono': self.force_bluetooth_mono,
+        })
+        if self._router_running():
+            self.restart_service()
+            self.statusBar().showMessage("Force mono updated; router restarted", 2500)
+        else:
+            self.statusBar().showMessage("Force mono preference saved", 2000)
+
     def update_devices(self, devices: List[Dict]):
         """Update devices table and default-sink combo"""
-        self.devices = devices
-        self.devices_table.setRowCount(len(devices))
+        visible_devices = [
+            d for d in devices
+            if not self._is_internal_remap_sink_id((d.get('id') or ''))
+        ]
+        self.devices = visible_devices
+        self.devices_table.setRowCount(len(visible_devices))
         self._refresh_default_sink_combo()
         self._update_stream_route_buttons_state()
         # Refresh rules table so Target Device column shows friendly names now that we have devices
         self.update_rules_table()
         
-        for i, device in enumerate(devices):
+        for i, device in enumerate(visible_devices):
             # Status indicator
             status_item = self._device_status_item(device.get('connected'))
             self.devices_table.setItem(i, 0, status_item)
@@ -1838,11 +1933,12 @@ class AudioRouterGUI(QMainWindow):
 
     def update_streams(self, streams: List[Dict]):
         """Update active streams table: app, output device (friendly), route (rule or Default)."""
-        self.current_streams = streams
+        visible_streams = [s for s in streams if not self._is_internal_remap_stream(s)]
+        self.current_streams = visible_streams
         sink_index_to_name = self._get_sink_index_to_name()
         default_sink_name = DeviceMonitor().get_default_sink() or ''
-        self.streams_table.setRowCount(len(streams))
-        for i, stream in enumerate(streams):
+        self.streams_table.setRowCount(len(visible_streams))
+        for i, stream in enumerate(visible_streams):
             app_name = (
                 stream.get('application_name')
                 or stream.get('application.name')
@@ -1854,10 +1950,17 @@ class AudioRouterGUI(QMainWindow):
             # Output device: resolve sink index -> name -> friendly
             sink_idx = stream.get('sink', '')
             sink_name = sink_index_to_name.get(sink_idx, sink_idx)
-            device = next((d for d in self.devices if d.get('id') == sink_name), None)
-            out_label = (device.get('friendly_name') or device.get('name')) if device else sink_name
+            mono_remap_active = sink_name.startswith('sinkswitch_mono.') if isinstance(sink_name, str) else False
+            display_sink_name = sink_name
+            if mono_remap_active:
+                display_sink_name = self._normalize_mono_master_sink(sink_name)
+
+            device = next((d for d in self.devices if d.get('id') == display_sink_name), None)
+            out_label = (device.get('friendly_name') or device.get('name')) if device else display_sink_name
             if not out_label:
-                out_label = sink_name or 'Unknown'
+                out_label = display_sink_name or 'Unknown'
+            if mono_remap_active:
+                out_label = f"{out_label} (mono)"
             self.streams_table.setItem(i, 1, QTableWidgetItem(out_label))
             # Route: matching rule name or fallback status for unmatched streams.
             temporary_target_id = None
@@ -1874,6 +1977,8 @@ class AudioRouterGUI(QMainWindow):
                 route_label = 'Unmatched (not on default)'
             else:
                 route_label = 'Default'
+            if mono_remap_active:
+                route_label = f"{route_label} [Mono active]"
             self.streams_table.setItem(i, 2, QTableWidgetItem(route_label))
         self._update_stream_route_buttons_state()
 
@@ -2379,7 +2484,11 @@ class AudioRouterGUI(QMainWindow):
         """Start the router in-app (background thread)."""
         if self.monitor_thread and self.monitor_thread.isRunning():
             return
-        self.monitor_thread = MonitorThread(self.config_file)
+        self.monitor_thread = MonitorThread(
+            self.config_file,
+            auto_mono_single_channel_bluetooth=self.auto_mono_single_channel_bluetooth,
+            force_bluetooth_mono=self.force_bluetooth_mono,
+        )
         self.monitor_thread.routing_notification.connect(self._on_routing_notification)
         self.monitor_thread.start()
         self.update_service_status()

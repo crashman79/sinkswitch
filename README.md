@@ -18,6 +18,7 @@ Route application audio to different outputs (Bluetooth, USB, HDMI, etc.) by rul
 - **First run** — If no config exists, SinkSwitch auto-generates an initial set of routing rules from your connected devices (e.g. browsers, meetings, media → Bluetooth or USB headset when present). You can edit or remove these in the Routing Rules tab.
 - **Router off until you start it** — Until you click **Start** in the toolbar, the router does nothing; all apps use the system default output.
 - **Default output** — Once the router is running, streams that do not match any rule go to the **Default output** you set in the toolbar. Matched streams go to the device specified by their rule.
+- **Single-earbud Bluetooth handling** — Optional in Settings. When enabled and a Bluetooth sink reports a single output channel (common when one earbud is in the case), SinkSwitch routes matching streams through a mono remap sink so left/right content is mixed. When both channels are available, routing stays stereo. If detection fails on your headset, use the **Force Mono** toolbar button to override detection.
 
 ## Install and run
 

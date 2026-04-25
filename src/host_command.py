@@ -15,6 +15,8 @@ _PACTL_HOST_SUBCOMMANDS = frozenset(
         "move-sink-input",
         "set-default-sink",
         "set-card-profile",
+        "load-module",
+        "unload-module",
     }
 )
 
