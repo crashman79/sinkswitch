@@ -37,6 +37,33 @@ class AudioRouterEngine:
             out = out[len(self.MONO_REMAP_PREFIX):]
         return out
 
+    def cleanup_managed_sinks(self) -> None:
+        """Unload all SinkSwitch remap sinks created by this app session."""
+        self._required_mono_masters = set()
+        self._cleanup_sinkswitch_remaps(startup=True)
+
+    def _friendly_sink_label(self, sink_name: str) -> str:
+        """Return a concise human-readable label for a sink id."""
+        normalized = self._normalize_master_sink_name(sink_name)
+        try:
+            for device in self.device_monitor.get_devices():
+                if device.get('id') != normalized:
+                    continue
+                friendly = (
+                    device.get('friendly_name')
+                    or device.get('description')
+                    or device.get('name')
+                    or normalized
+                )
+                friendly = str(friendly).strip()
+                return re.sub(r'\s+', ' ', friendly)[:60] if friendly else normalized[:60]
+        except Exception as e:
+            logger.debug("Failed to resolve friendly sink label for %s: %s", normalized, e)
+
+        fallback = normalized.split('.')[-1].replace('_', ' ').strip()
+        fallback = re.sub(r'\s+', ' ', fallback)
+        return fallback[:60] if fallback else normalized[:60]
+
     def _list_sinkswitch_remap_modules(self) -> List[Dict[str, str]]:
         """Return remap module rows for SinkSwitch-managed mono sinks."""
         modules: List[Dict[str, str]] = []
@@ -257,7 +284,8 @@ class AudioRouterEngine:
 
         sanitized = re.sub(r'[^a-zA-Z0-9_.-]', '_', master_sink)
         mono_sink_name = f"{self.MONO_REMAP_PREFIX}{sanitized}"[:120]
-        sink_desc = f"SinkSwitch_Mono_for_{sanitized}"[:160]
+        sink_label = self._friendly_sink_label(master_sink)
+        sink_desc = f"SinkSwitch Mono ({sink_label})"[:160]
 
         result = subprocess.run(
             host_cmd([
@@ -266,7 +294,7 @@ class AudioRouterEngine:
                 'module-remap-sink',
                 f'sink_name={mono_sink_name}',
                 f'master={master_sink}',
-            f'sink_properties=device.description={sink_desc}',
+                f"sink_properties=device.description='{sink_desc}'",
                 'channels=1',
                 'channel_map=mono',
                 'remix=yes',

@@ -268,6 +268,7 @@ class MonitorThread(QThread):
         self.auto_mono_single_channel_bluetooth = auto_mono_single_channel_bluetooth
         self.force_bluetooth_mono = force_bluetooth_mono
         self.stop_event = threading.Event()
+        self.engine: Optional[AudioRouterEngine] = None
         self._temporary_routes: Dict[str, str] = {}
         self._temporary_routes_lock = threading.Lock()
 
@@ -313,7 +314,7 @@ class MonitorThread(QThread):
             parser = ConfigParser(str(self.config_file))
             rules_ref[:] = parser.parse()
             monitor = DeviceMonitor()
-            engine = AudioRouterEngine(
+            self.engine = AudioRouterEngine(
                 auto_mono_single_channel_bluetooth=self.auto_mono_single_channel_bluetooth,
                 force_bluetooth_mono=self.force_bluetooth_mono,
             )
@@ -323,13 +324,16 @@ class MonitorThread(QThread):
                     logger.info("Reloading routing configuration after device change...")
                     reloaded_rules = ConfigParser(str(self.config_file)).parse()
                     rules_ref[:] = reloaded_rules
-                    engine.apply_rules(rules_ref)
+                    if self.engine:
+                        self.engine.apply_rules(rules_ref)
                 except Exception as e:
                     logger.error(f"Failed to reload config: {e}")
 
             def apply_rules():
                 effective_rules = list(rules_ref) + self._temporary_rules()
-                results = engine.apply_rules(effective_rules)
+                if not self.engine:
+                    return
+                results = self.engine.apply_rules(effective_rules)
                 for r in results:
                     if r.get('success') and r.get('routed_count', 0) > 0:
                         self.routing_notification.emit(
@@ -343,12 +347,17 @@ class MonitorThread(QThread):
 
             monitor.watch_devices(
                 apply_rules,
+                interval=1,
                 config_regen_callback=regenerate_and_reload,
                 stop_event=self.stop_event,
                 rules_ref=rules_ref,
             )
         except Exception as e:
             logger.error(f"Monitor error: {e}")
+        finally:
+            if self.engine:
+                self.engine.cleanup_managed_sinks()
+                self.engine = None
 
     def stop(self):
         self.stop_event.set()
@@ -1204,6 +1213,19 @@ class AudioRouterGUI(QMainWindow):
         refresh_btn.clicked.connect(self.refresh_devices)
         devices_layout.addWidget(refresh_btn)
 
+        self.easy_effects_warning = QLabel(
+            "⚠ Easy Effects detected. To avoid conflicts, disable "
+            "\"Process all output streams\" and \"Process all input streams\" "
+            "in Easy Effects → General Settings, then enable only the specific "
+            "devices or apps you want it to process."
+        )
+        self.easy_effects_warning.setWordWrap(True)
+        self.easy_effects_warning.setStyleSheet(
+            "background: #7c4a00; color: #fff3cd; padding: 6px 10px; border-radius: 4px;"
+        )
+        self.easy_effects_warning.setVisible(False)
+        devices_layout.addWidget(self.easy_effects_warning)
+
         self.devices_table = QTableWidget()
         self.devices_table.setColumnCount(4)
         self.devices_table.setHorizontalHeaderLabels(['Status', 'Name', 'Type', 'Device ID'])
@@ -1833,6 +1855,13 @@ class AudioRouterGUI(QMainWindow):
         self._update_stream_route_buttons_state()
         # Refresh rules table so Target Device column shows friendly names now that we have devices
         self.update_rules_table()
+
+        easy_effects_present = any(
+            'easyeffects' in (d.get('id') or '').lower()
+            for d in devices
+        )
+        if hasattr(self, 'easy_effects_warning'):
+            self.easy_effects_warning.setVisible(easy_effects_present)
         
         for i, device in enumerate(visible_devices):
             # Status indicator

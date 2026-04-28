@@ -447,6 +447,7 @@ class DeviceMonitor:
         callback: Callable,
         config_regen_callback: Optional[Callable],
         rules_ref: Optional[List[Dict]],
+        force_apply: bool = False,
     ) -> None:
         """One iteration: fetch state, optional config regen, relevance check, callback if needed."""
         current_devices = self.get_devices()
@@ -478,9 +479,11 @@ class DeviceMonitor:
             device_changed = device_changed and rule_target_ids and self._device_change_involves_rules(current_devices, rule_target_ids)
             stream_changed = stream_changed and self._stream_change_involves_rules(current_streams, rules_ref)
 
-        if periodic_rules or device_changed or stream_changed:
+        if force_apply or periodic_rules or device_changed or stream_changed:
             if periodic_rules and not device_changed and not stream_changed:
                 logger.debug("Periodic routing re-apply")
+            elif force_apply and not device_changed and not stream_changed:
+                logger.debug("Forced routing re-apply due to real-time sink-input event")
             elif device_changed and stream_changed:
                 logger.info("Devices and audio streams changed - applying routing rules")
             elif device_changed:
@@ -491,7 +494,7 @@ class DeviceMonitor:
             self.last_streams = current_streams
             callback()
 
-    def watch_devices(self, callback: Callable, interval: int = 5, config_regen_callback: Optional[Callable] = None, stop_event: Optional[threading.Event] = None, rules_ref: Optional[List[Dict]] = None):
+    def watch_devices(self, callback: Callable, interval: int = 2, config_regen_callback: Optional[Callable] = None, stop_event: Optional[threading.Event] = None, rules_ref: Optional[List[Dict]] = None):
         """Watch for device changes and call callback when changes detected.
 
         Uses pactl subscribe (event-based) when available for low latency and no polling;
@@ -537,6 +540,13 @@ class DeviceMonitor:
             return False
         event_occurred = threading.Event()
         debounce_sec = 0.5
+        # New/removed sink-inputs need a much shorter debounce so streams are
+        # rerouted before more than a frame or two of audio leaks to the wrong
+        # output (e.g. speakers when earbuds is the intended target).
+        fast_debounce_sec = 0.1
+        # Shared mutable cell so read_events() can signal which debounce to use.
+        _pending_debounce = [debounce_sec]
+        _pending_force_apply = [False]
         bt_interval_sec = 30.0
         last_bt = time.time()
 
@@ -546,9 +556,20 @@ class DeviceMonitor:
                     if stop_event and stop_event.is_set():
                         break
                     line = (line or '').strip().lower()
-                    if not line or line.startswith('Event '):
+                    if not line:
                         continue
-                    if 'sink' in line or 'server' in line:
+                    if self._is_routing_relevant_subscribe_event(line):
+                        # Stream creation/removal warrants fastest possible reaction;
+                        # take the minimum so a fast event is never overridden by a
+                        # slower one that arrives in the same burst.
+                        if "sink-input" in line:
+                            _pending_force_apply[0] = True
+                        if (
+                            "'new' on sink-input" in line
+                            or "'remove' on sink-input" in line
+                            or "'change' on sink-input" in line
+                        ):
+                            _pending_debounce[0] = min(_pending_debounce[0], fast_debounce_sec)
                         event_occurred.set()
             except Exception as e:
                 logger.debug("pactl subscribe read error: %s", e)
@@ -572,10 +593,19 @@ class DeviceMonitor:
                 timeout = max(0.1, min(timeout, 1.0))
                 if event_occurred.wait(timeout=timeout):
                     event_occurred.clear()
-                    time.sleep(debounce_sec)
+                    use_debounce = _pending_debounce[0]
+                    force_apply = _pending_force_apply[0]
+                    _pending_debounce[0] = debounce_sec  # reset for next batch
+                    _pending_force_apply[0] = False
+                    time.sleep(use_debounce)
                     if stop_event and stop_event.is_set():
                         break
-                    self._run_watch_iteration(callback, config_regen_callback, rules_ref)
+                    self._run_watch_iteration(
+                        callback,
+                        config_regen_callback,
+                        rules_ref,
+                        force_apply=force_apply,
+                    )
                 if now - last_bt >= bt_interval_sec:
                     last_bt = now
                     self._run_watch_iteration(callback, config_regen_callback, rules_ref)
@@ -588,6 +618,18 @@ class DeviceMonitor:
             except Exception:
                 pass
         return True
+
+    @staticmethod
+    def _is_routing_relevant_subscribe_event(event_line: str) -> bool:
+        """Return True for pactl subscribe events that can affect stream routing."""
+        normalized = (event_line or '').strip().lower()
+        if not normalized:
+            return False
+        # pactl subscribe lines are commonly like:
+        #   Event 'new' on sink-input #123
+        #   Event 'change' on sink #45
+        # We care about sink-input/sink/server/card changes for low-latency rerouting.
+        return any(token in normalized for token in ('sink-input', 'sink #', 'server', 'card'))
     
     def _devices_changed(self, current_devices: List[Dict]) -> bool:
         """Check if device list has changed"""
