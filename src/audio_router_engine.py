@@ -6,9 +6,11 @@ Audio routing engine - applies routing rules to audio streams
 import subprocess
 import logging
 import re
+import time
 from typing import Dict, List, Optional, Set, Tuple
 from device_monitor import DeviceMonitor
 from host_command import host_cmd, SUBPROCESS_TEXT_KW
+from routing_latency_log import log_latency_event, get_latency_log_path
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +29,14 @@ class AudioRouterEngine:
         self.force_bluetooth_mono = force_bluetooth_mono
         self._mono_sink_cache: Dict[str, str] = {}
         self._required_mono_masters: Set[str] = set()
+        self._mono_ensure_backoff_until: Dict[str, float] = {}
+        self._remap_stream_check_until: Dict[str, float] = {}
+        self._a2dp_last_attempt_ts: Dict[str, float] = {}
+        self._stream_first_seen_ts: Dict[str, float] = {}
+        self._apply_seq = 0
         # Clean stale remap modules from prior runs to avoid nested leftovers.
         self._cleanup_sinkswitch_remaps(startup=True)
+        log_latency_event(f"engine_started log_path={get_latency_log_path()}")
 
     def _normalize_master_sink_name(self, sink_name: str) -> str:
         """Unwrap SinkSwitch mono remap sink names to their underlying master sink."""
@@ -271,15 +279,23 @@ class AudioRouterEngine:
     def _ensure_mono_remap_sink(self, master_sink: str) -> str:
         """Create/reuse a mono remap sink for master_sink; return sink to route to."""
         master_sink = self._normalize_master_sink_name(master_sink)
+        now = time.monotonic()
+        if now < self._mono_ensure_backoff_until.get(master_sink, 0.0):
+            return master_sink
+
         cached = self._mono_sink_cache.get(master_sink)
         if cached and self._resolve_sink(cached):
-            self._ensure_remap_stream_on_master_sink(master_sink)
+            if now >= self._remap_stream_check_until.get(master_sink, 0.0):
+                self._ensure_remap_stream_on_master_sink(master_sink)
+                self._remap_stream_check_until[master_sink] = now + 1.0
             return cached
 
         existing = self._find_existing_mono_remap_sink(master_sink)
         if existing and self._resolve_sink(existing):
             self._mono_sink_cache[master_sink] = existing
-            self._ensure_remap_stream_on_master_sink(master_sink)
+            if now >= self._remap_stream_check_until.get(master_sink, 0.0):
+                self._ensure_remap_stream_on_master_sink(master_sink)
+                self._remap_stream_check_until[master_sink] = now + 1.0
             return existing
 
         sanitized = re.sub(r'[^a-zA-Z0-9_.-]', '_', master_sink)
@@ -313,15 +329,24 @@ class AudioRouterEngine:
                 master_sink,
                 err or f"exit {result.returncode}",
             )
+            self._mono_ensure_backoff_until[master_sink] = time.monotonic() + 3.0
+            log_latency_event(
+                f"mono_remap_create_failed master={master_sink} backoff_ms=3000"
+            )
             return master_sink
 
         if self._resolve_sink(mono_sink_name):
             logger.info("Created mono remap sink %s for %s", mono_sink_name, master_sink)
             self._mono_sink_cache[master_sink] = mono_sink_name
             self._ensure_remap_stream_on_master_sink(master_sink)
+            self._remap_stream_check_until[master_sink] = time.monotonic() + 1.0
             return mono_sink_name
 
         logger.warning("Mono remap sink %s was created but not resolvable; using %s", mono_sink_name, master_sink)
+        self._mono_ensure_backoff_until[master_sink] = time.monotonic() + 3.0
+        log_latency_event(
+            f"mono_remap_not_resolvable master={master_sink} backoff_ms=3000"
+        )
         return master_sink
 
     def _get_effective_target_sink(self, sink_name: str) -> str:
@@ -329,11 +354,16 @@ class AudioRouterEngine:
         if 'bluez' not in (sink_name or '').lower():
             return sink_name
         master_sink = self._normalize_master_sink_name(sink_name)
+        started = time.monotonic()
         if self.force_bluetooth_mono:
             mono_sink = self._ensure_mono_remap_sink(master_sink)
             if mono_sink != sink_name:
                 logger.info("Forced Bluetooth mono enabled for %s; routing via %s", sink_name, mono_sink)
             self._required_mono_masters.add(master_sink)
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            log_latency_event(
+                f"effective_target force_mono=1 sink={sink_name} routed={mono_sink} elapsed_ms={elapsed_ms}"
+            )
             return mono_sink
         if not self.auto_mono_single_channel_bluetooth:
             return sink_name
@@ -343,6 +373,10 @@ class AudioRouterEngine:
         if mono_sink != sink_name:
             logger.info("Single-channel Bluetooth sink detected for %s; routing via %s", sink_name, mono_sink)
         self._required_mono_masters.add(master_sink)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        log_latency_event(
+            f"effective_target auto_mono=1 sink={sink_name} routed={mono_sink} elapsed_ms={elapsed_ms}"
+        )
         return mono_sink
     
     def _ensure_a2dp_profile(self, sink_name: str) -> bool:
@@ -366,6 +400,12 @@ class AudioRouterEngine:
             
             device_address = parts[1].replace('_', ':')  # Convert to colon format
             
+            # Avoid repeatedly forcing profile changes on every fast apply loop.
+            now = time.monotonic()
+            last_attempt = self._a2dp_last_attempt_ts.get(device_address, 0.0)
+            if now - last_attempt < 10.0:
+                return True
+            self._a2dp_last_attempt_ts[device_address] = now
             # Attempt to set A2DP profile
             return self.device_monitor.prefer_a2dp_profile(device_address)
         
@@ -383,7 +423,11 @@ class AudioRouterEngine:
             List of result dictionaries with success status and messages
         """
         results = []
+        started = time.monotonic()
+        self._apply_seq += 1
+        apply_seq = self._apply_seq
         self._required_mono_masters = set()
+        log_latency_event(f"apply_start seq={apply_seq} rules={len(rules)}")
         
         for rule in rules:
             result = self._apply_rule(rule)
@@ -392,6 +436,9 @@ class AudioRouterEngine:
         # Also enforce fallback behavior for streams that do not match any rule.
         results.append(self._route_unmatched_streams_to_default(rules))
         self._cleanup_sinkswitch_remaps(startup=False)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        moved_total = sum(int(r.get('routed_count', 0) or 0) for r in results)
+        log_latency_event(f"apply_done seq={apply_seq} moved={moved_total} elapsed_ms={elapsed_ms}")
         
         return results
     
@@ -493,26 +540,70 @@ class AudioRouterEngine:
         routed_count = 0
         
         try:
-            # Get list of running applications
-            running_apps = self._get_running_applications()
-            
-            # Find matching applications
-            for app_name in running_apps:
-                if self._matches_rule(app_name, applications, keywords):
-                    logger.debug(f"App '{app_name}' matches rule, routing to {target_devices[0]}")
-                    # Try each target device variant until one succeeds
-                    for target_device in target_devices:
-                        if self._route_stream(app_name, target_device):
-                            routed_count += 1
-                            break
-                else:
-                    logger.debug(f"App '{app_name}' does NOT match rule")
-            
+            if not target_devices:
+                return 0
+
+            resolved_target: Optional[Tuple[str, str]] = None
+            for target_device in target_devices:
+                resolved_target = self._resolve_sink(target_device)
+                if resolved_target:
+                    break
+
+            if not resolved_target:
+                logger.warning("Could not resolve any routing target from %s", target_devices)
+                return 0
+
+            target_sink_id, target_sink_name = resolved_target
+            streams = self._get_sink_inputs()
+
+            for stream in streams:
+                if self._is_internal_mono_remap_stream(stream):
+                    continue
+
+                if not self._stream_matches_rule(stream, applications, keywords):
+                    continue
+
+                sink_input_id = stream.get('index')
+                if not sink_input_id:
+                    continue
+
+                if stream.get('sink') == target_sink_id:
+                    continue
+
+                if self._move_sink_input(sink_input_id, target_sink_name, target_sink_id):
+                    routed_count += 1
+                    first_seen = self._stream_first_seen_ts.get(sink_input_id)
+                    age_ms = int((time.monotonic() - first_seen) * 1000) if first_seen else -1
+                    app = stream.get('application_name') or stream.get('application_process_binary') or 'unknown'
+                    log_latency_event(
+                        f"stream_moved sink_input={sink_input_id} app={app} to={target_sink_name} first_seen_to_move_ms={age_ms}"
+                    )
+
             return routed_count
         
         except Exception as e:
             logger.debug(f"Error routing applications: {e}")
             return routed_count
+
+    def _stream_matches_rule(
+        self,
+        stream: Dict[str, str],
+        applications: List[str],
+        keywords: List[str],
+    ) -> bool:
+        """Return True if stream metadata matches rule criteria.
+
+        Some stream properties (like application.name) can lag slightly when a
+        stream first appears. Include process/media hints so initial routing can
+        happen before metadata fully settles.
+        """
+        candidates = [
+            stream.get('application_name', ''),
+            stream.get('application_process_binary', ''),
+            stream.get('media_name', ''),
+            stream.get('node_name', ''),
+        ]
+        return any(self._matches_rule(candidate, applications, keywords) for candidate in candidates if candidate)
     
     def _matches_rule(self,
                      app_name: str,
@@ -585,6 +676,9 @@ class AudioRouterEngine:
                 elif 'application.name' in line and '=' in line:
                     app_name = line.split('=', 1)[1].strip().strip('"')
                     current['application_name'] = app_name
+                elif 'application.process.binary' in line and '=' in line:
+                    app_binary = line.split('=', 1)[1].strip().strip('"')
+                    current['application_process_binary'] = app_binary
                 elif 'media.name' in line and '=' in line:
                     media_name = line.split('=', 1)[1].strip().strip('"')
                     current['media_name'] = media_name
@@ -594,6 +688,20 @@ class AudioRouterEngine:
 
             if current and current.get('index'):
                 streams.append(current)
+
+            now = time.monotonic()
+            current_ids: Set[str] = set()
+            for stream in streams:
+                sink_input_id = stream.get('index')
+                if not sink_input_id:
+                    continue
+                current_ids.add(sink_input_id)
+                self._stream_first_seen_ts.setdefault(sink_input_id, now)
+
+            stale_ids = [sid for sid in self._stream_first_seen_ts.keys() if sid not in current_ids]
+            for sid in stale_ids:
+                self._stream_first_seen_ts.pop(sid, None)
+
             return streams
         except Exception as e:
             logger.debug(f"Failed to read sink inputs: {e}")
