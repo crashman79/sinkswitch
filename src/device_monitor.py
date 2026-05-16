@@ -715,9 +715,12 @@ class DeviceMonitor:
     @staticmethod
     def _bluez_mac_from_sink_id(sink_id: str) -> Optional[str]:
         """MAC segment from e.g. bluez_output.00_02_3C_AD_09_85.2 → 00_02_3C_AD_09_85."""
-        if not sink_id or 'bluez' not in sink_id.lower():
+        normalized = sink_id or ''
+        while normalized.startswith('sinkswitch_mono.'):
+            normalized = normalized[len('sinkswitch_mono.'):]
+        if not normalized or 'bluez' not in normalized.lower():
             return None
-        parts = sink_id.split('.')
+        parts = normalized.split('.')
         return parts[1] if len(parts) >= 2 else None
 
     def _bluez_macs_from_rule_targets(self, rule_target_ids: Set[str]) -> Set[str]:

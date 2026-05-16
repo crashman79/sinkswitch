@@ -412,6 +412,47 @@ class AudioRouterEngine:
         except Exception as e:
             logger.debug(f"Failed to ensure A2DP profile: {e}")
             return False
+
+    def _extract_bluetooth_mac(self, sink_name: str) -> Optional[str]:
+        """Return Bluetooth MAC segment for a sink id (supports mono-remap wrapped ids)."""
+        normalized = self._normalize_master_sink_name(sink_name or '')
+        if not normalized.lower().startswith('bluez_output.'):
+            return None
+        parts = normalized.split('.')
+        if len(parts) < 2:
+            return None
+        return parts[1]
+
+    def _expand_targets_with_live_bluetooth_sinks(self, targets: List[str]) -> List[str]:
+        """Append currently available Bluetooth sinks that match target MAC(s)."""
+        ordered_targets: List[str] = []
+        seen: Set[str] = set()
+        for target in targets:
+            if not target or target in seen:
+                continue
+            ordered_targets.append(target)
+            seen.add(target)
+
+        target_macs = {m for t in ordered_targets if (m := self._extract_bluetooth_mac(t))}
+        if not target_macs:
+            return ordered_targets
+
+        try:
+            for device in self.device_monitor.get_devices():
+                sink_id = device.get('id') or ''
+                if not sink_id:
+                    continue
+                sink_mac = self._extract_bluetooth_mac(sink_id)
+                if sink_mac not in target_macs:
+                    continue
+                if sink_id in seen:
+                    continue
+                ordered_targets.append(sink_id)
+                seen.add(sink_id)
+        except Exception as e:
+            logger.debug("Failed expanding Bluetooth targets %s: %s", ordered_targets, e)
+
+        return ordered_targets
     
     def apply_rules(self, rules: List[Dict]) -> List[Dict]:
         """Apply routing rules to audio streams
@@ -453,12 +494,17 @@ class AudioRouterEngine:
         """
         rule_name = rule.get('name', 'Unknown')
         target_device = rule.get('target_device')
-        target_variants = rule.get('target_device_variants', [])
+        target_variants = rule.get('target_device_variants') or []
         
-        # Build list of all target devices to try
-        all_targets = [target_device]
-        if target_variants:
-            all_targets = target_variants
+        # Build list of all target devices to try.
+        # Keep the primary target and extend with configured variants.
+        all_targets: List[str] = []
+        if target_device:
+            all_targets.append(target_device)
+        for variant in target_variants:
+            if variant and variant not in all_targets:
+                all_targets.append(variant)
+        all_targets = self._expand_targets_with_live_bluetooth_sinks(all_targets)
         
         try:
             # Check if any target device variant is connected
@@ -745,7 +791,7 @@ class AudioRouterEngine:
 
     def _ensure_remap_stream_on_master_sink(self, master_sink: str) -> None:
         """Move mono remap internal stream back to master sink if fallback displaced it."""
-        master_resolved = self._resolve_sink(master_sink)
+        master_resolved = self._resolve_sink(master_sink, allow_managed_remaps=False)
         if not master_resolved:
             return
         master_sink_id, master_sink_name = master_resolved
@@ -921,8 +967,12 @@ class AudioRouterEngine:
             logger.debug(f"PipeWire routing failed: {e}")
             return False
     
-    def _resolve_sink(self, device_name: str) -> Optional[Tuple[str, str]]:
-        """Return (sink_index, sink_name); BT ids match by MAC if PipeWire renumbered suffix."""
+    def _resolve_sink(self, device_name: str, allow_managed_remaps: bool = True) -> Optional[Tuple[str, str]]:
+        """Return (sink_index, sink_name); BT ids match by MAC if PipeWire renumbered suffix.
+
+        When allow_managed_remaps is False, ignore SinkSwitch-managed mono remap sinks so
+        physical Bluetooth master sinks are resolved instead of derived remap nodes.
+        """
         try:
             device_name_lower = (device_name or '').lower()
             use_bluetooth_fuzzy = device_name_lower.startswith('bluez_output.')
@@ -939,6 +989,8 @@ class AudioRouterEngine:
                     current_sink_id = line.split('#')[1].strip()
                 elif 'Name:' in line:
                     name_value = line.split('Name:')[1].strip()
+                    if not allow_managed_remaps and name_value.startswith(self.MONO_REMAP_PREFIX):
+                        continue
                     if device_name in line or name_value == device_name:
                         return (current_sink_id, name_value)
                     if use_bluetooth_fuzzy and 'bluez' in name_value.lower():

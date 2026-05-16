@@ -9,6 +9,9 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 import yaml
+from unittest.mock import patch
+from types import SimpleNamespace
+from audio_router_engine import AudioRouterEngine
 from intelligent_audio_router import IntelligentAudioRouter, DeviceClassifier
 
 # Mock devices for testing
@@ -257,6 +260,43 @@ def test_routing_rules_generation():
     return all_pass
 
 
+def test_bt_master_sink_resolution_skips_managed_remaps():
+    """Regression test: physical Bluetooth sink resolution must ignore SinkSwitch remap sinks."""
+    print("\n" + "="*80)
+    print("TEST 4: Bluetooth Master Sink Resolution")
+    print("="*80)
+
+    sinks_output = """Sink #12
+Name: sinkswitch_mono.bluez_output.00_02_3C_AD_09_85.1
+
+Sink #13
+Name: bluez_output.00_02_3C_AD_09_85.1
+"""
+
+    def fake_run(cmd, **kwargs):
+        joined = " ".join(cmd)
+        if "pactl list sinks" in joined:
+            return SimpleNamespace(returncode=0, stdout=sinks_output, stderr="")
+        if "pactl list short modules" in joined:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "pactl list short sinks" in joined:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with patch("audio_router_engine.subprocess.run", side_effect=fake_run), \
+         patch.object(AudioRouterEngine, "_cleanup_sinkswitch_remaps", return_value=None):
+        engine = AudioRouterEngine()
+        resolved = engine._resolve_sink(
+            "bluez_output.00_02_3C_AD_09_85.1",
+            allow_managed_remaps=False,
+        )
+
+    passed = resolved == ("13", "bluez_output.00_02_3C_AD_09_85.1")
+    status = "✓" if passed else "✗"
+    print(f"{status} Resolver returned physical Bluetooth sink: {resolved}")
+    return passed
+
+
 def main():
     print("\n" + "="*80)
     print("IDEMPOTENCY TEST SUITE")
@@ -266,6 +306,7 @@ def main():
     test_1 = test_device_classification()
     test_2 = test_scenario_consistency()
     test_3 = test_routing_rules_generation()
+    test_4 = test_bt_master_sink_resolution_skips_managed_remaps()
     
     print("\n" + "="*80)
     print("TEST SUMMARY")
@@ -273,9 +314,10 @@ def main():
     print(f"Device Classification:      {'✓ PASS' if test_1 else '✗ FAIL'}")
     print(f"Scenario Consistency:       {'✓ PASS' if test_2 else '✗ FAIL'}")
     print(f"Routing Rules Determinism: {'✓ PASS' if test_3 else '✗ FAIL'}")
+    print(f"BT Master Resolution:       {'✓ PASS' if test_4 else '✗ FAIL'}")
     print("="*80)
     
-    if test_1 and test_2 and test_3:
+    if test_1 and test_2 and test_3 and test_4:
         print("\n✓ All idempotency tests PASSED\n")
         return 0
     else:
