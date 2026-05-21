@@ -212,6 +212,68 @@ class AudioRouterEngine:
                     return sink_name
         return None
 
+    def _fix_remap_output_routing(self, mono_sink_name: str, actual_master_name: str) -> None:
+        """Move the remap module's internal output stream to the correct master sink.
+
+        WirePlumber persists per-stream routing state by node name.  When a remap
+        sink is recreated (or loaded for the first time after a stale state entry
+        exists), WirePlumber will route the 'output.<mono_sink_name>' stream back
+        to whatever sink it last used (often the system default / analog), ignoring
+        the master= argument we passed to module-remap-sink.  Explicitly moving
+        the stream overwrites that state so PipeWire routes correctly.
+        """
+        output_node_name = f"output.{mono_sink_name}"
+        resolved = self._resolve_sink(actual_master_name, allow_managed_remaps=False)
+        if not resolved:
+            logger.debug("_fix_remap_output_routing: cannot resolve master %r", actual_master_name)
+            return
+        master_id, master_name = resolved
+
+        try:
+            result = subprocess.run(
+                host_cmd(['pactl', 'list', 'sink-inputs']),
+                capture_output=True,
+                text=True,
+                **SUBPROCESS_TEXT_KW,
+                timeout=5,
+                check=False,
+            )
+            if result.returncode != 0:
+                return
+
+            current_id: Optional[str] = None
+            current_sink: Optional[str] = None
+            current_node: Optional[str] = None
+            for raw_line in result.stdout.split('\n'):
+                line = raw_line.strip()
+                if line.startswith('Sink Input #'):
+                    # Process previous entry
+                    if current_id and current_node == output_node_name and current_sink != master_id:
+                        self._move_sink_input(current_id, master_name, master_id)
+                        logger.debug(
+                            "Corrected remap output stream %r from sink #%s to %s",
+                            output_node_name, current_sink, master_name,
+                        )
+                    current_id = line.split('#', 1)[1].strip()
+                    current_sink = None
+                    current_node = None
+                elif line.startswith('Sink:'):
+                    parts = line.split(':', 1)[1].strip().split()
+                    if parts:
+                        current_sink = parts[0]
+                elif 'node.name' in line and '=' in line:
+                    current_node = line.split('=', 1)[1].strip().strip('"')
+
+            # Handle last entry
+            if current_id and current_node == output_node_name and current_sink != master_id:
+                self._move_sink_input(current_id, master_name, master_id)
+                logger.debug(
+                    "Corrected remap output stream %r from sink #%s to %s",
+                    output_node_name, current_sink, master_name,
+                )
+        except Exception as e:
+            logger.debug("_fix_remap_output_routing error: %s", e)
+
     def _ensure_mono_remap_sink(self, master_sink: str) -> str:
         """Create/reuse a mono remap sink for master_sink; return sink to route to."""
         master_sink = self._normalize_master_sink_name(master_sink)
@@ -229,11 +291,13 @@ class AudioRouterEngine:
 
         cached = self._mono_sink_cache.get(master_sink)
         if cached and self._resolve_sink(cached):
+            self._fix_remap_output_routing(cached, actual_master_name)
             return cached
 
         existing = self._find_existing_mono_remap_sink(master_sink)
         if existing and self._resolve_sink(existing):
             self._mono_sink_cache[master_sink] = existing
+            self._fix_remap_output_routing(existing, actual_master_name)
             return existing
 
         sanitized = re.sub(r'[^a-zA-Z0-9_.-]', '_', master_sink)
@@ -270,6 +334,7 @@ class AudioRouterEngine:
 
         if self._resolve_sink(mono_sink_name):
             self._mono_sink_cache[master_sink] = mono_sink_name
+            self._fix_remap_output_routing(mono_sink_name, actual_master_name)
             return mono_sink_name
         return master_sink
 
