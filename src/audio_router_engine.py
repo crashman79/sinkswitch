@@ -632,7 +632,7 @@ class AudioRouterEngine:
         return False
 
     def _get_sink_inputs(self) -> List[Dict[str, str]]:
-        """Return sink-input rows with index, sink (numeric id), and application_name."""
+        """Return sink-input rows with index/sink plus key stream properties."""
         try:
             result = subprocess.run(
                 host_cmd(['pactl', 'list', 'sink-inputs']),
@@ -661,6 +661,12 @@ class AudioRouterEngine:
                 elif 'application.name' in line and '=' in line:
                     app_name = line.split('=', 1)[1].strip().strip('"')
                     current['application_name'] = app_name
+                elif 'node.name' in line and '=' in line:
+                    node_name = line.split('=', 1)[1].strip().strip('"')
+                    current['node_name'] = node_name
+                elif 'media.name' in line and '=' in line:
+                    media_name = line.split('=', 1)[1].strip().strip('"')
+                    current['media_name'] = media_name
 
             if current and current.get('index'):
                 streams.append(current)
@@ -668,6 +674,29 @@ class AudioRouterEngine:
         except Exception as e:
             logger.debug(f"Failed to read sink inputs: {e}")
             return []
+
+    def _is_internal_remap_sink_input(self, stream: Dict[str, str]) -> bool:
+        """Return True for SinkSwitch-managed internal mono remap output streams."""
+        node_name = (stream.get('node_name') or '').strip()
+        media_name = (stream.get('media_name') or '').strip()
+        app_name = (stream.get('application_name') or '').strip()
+
+        if node_name.startswith(f"output.{self.MONO_REMAP_PREFIX}"):
+            return True
+        if node_name.startswith(self.MONO_REMAP_PREFIX):
+            return True
+        if 'sinkswitch_mono' in node_name.lower():
+            return True
+
+        lowered_media = media_name.lower()
+        if lowered_media.startswith('sinkswitch_mono_for_') and ' output' in lowered_media:
+            return True
+
+        # Some hosts expose the remap output without app name; keep this as a
+        # conservative guard against fallback moving internal streams.
+        if 'sinkswitch_mono' in app_name.lower():
+            return True
+        return False
 
     def _move_sink_input(self, sink_input_id: str, target_sink_name: str, target_sink_id: str) -> bool:
         """Move one sink-input, trying sink name first then numeric id."""
@@ -718,6 +747,8 @@ class AudioRouterEngine:
 
         for stream in streams:
             app_name = stream.get('application_name', '')
+            if self._is_internal_remap_sink_input(stream):
+                continue
             if self._matches_any_rule(app_name, rules):
                 continue
             if stream.get('sink') == default_sink_id:
