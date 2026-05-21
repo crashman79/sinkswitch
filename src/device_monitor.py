@@ -321,10 +321,9 @@ class DeviceMonitor:
                     elif key == 'description':
                         current_device['description'] = value
                     elif key == 'state':
-                        # On PipeWire, RUNNING/IDLE/SUSPENDED are all valid connected states.
-                        # Only mark a sink disconnected when it is explicitly unavailable.
+                        # SUSPENDED is normal (no audio playing), only treat IDLE/UNAVAILABLE as disconnected
                         state = value.lower()
-                        current_device['connected'] = state != 'unavailable'
+                        current_device['connected'] = state not in ['idle', 'unavailable']
                     else:
                         current_device['properties'][key] = value
             
@@ -547,9 +546,9 @@ class DeviceMonitor:
                     if stop_event and stop_event.is_set():
                         break
                     line = (line or '').strip().lower()
-                    if not line:
+                    if not line or line.startswith('Event '):
                         continue
-                    if self._is_routing_relevant_subscribe_event(line):
+                    if 'sink' in line or 'server' in line:
                         event_occurred.set()
             except Exception as e:
                 logger.debug("pactl subscribe read error: %s", e)
@@ -589,18 +588,6 @@ class DeviceMonitor:
             except Exception:
                 pass
         return True
-
-    @staticmethod
-    def _is_routing_relevant_subscribe_event(event_line: str) -> bool:
-        """Return True for pactl subscribe events that can affect stream routing."""
-        normalized = (event_line or '').strip().lower()
-        if not normalized:
-            return False
-        # pactl subscribe lines are commonly like:
-        #   Event 'new' on sink-input #123
-        #   Event 'change' on sink #45
-        # We care about sink-input/sink/server/card changes for low-latency rerouting.
-        return any(token in normalized for token in ('sink-input', 'sink #', 'server', 'card'))
     
     def _devices_changed(self, current_devices: List[Dict]) -> bool:
         """Check if device list has changed"""
@@ -715,12 +702,9 @@ class DeviceMonitor:
     @staticmethod
     def _bluez_mac_from_sink_id(sink_id: str) -> Optional[str]:
         """MAC segment from e.g. bluez_output.00_02_3C_AD_09_85.2 → 00_02_3C_AD_09_85."""
-        normalized = sink_id or ''
-        while normalized.startswith('sinkswitch_mono.'):
-            normalized = normalized[len('sinkswitch_mono.'):]
-        if not normalized or 'bluez' not in normalized.lower():
+        if not sink_id or 'bluez' not in sink_id.lower():
             return None
-        parts = normalized.split('.')
+        parts = sink_id.split('.')
         return parts[1] if len(parts) >= 2 else None
 
     def _bluez_macs_from_rule_targets(self, rule_target_ids: Set[str]) -> Set[str]:
