@@ -6,6 +6,7 @@ Audio routing engine - applies routing rules to audio streams
 import subprocess
 import logging
 import re
+import time
 from typing import Dict, List, Optional, Set, Tuple
 from device_monitor import DeviceMonitor
 from host_command import host_cmd, SUBPROCESS_TEXT_KW
@@ -337,6 +338,66 @@ class AudioRouterEngine:
             self._fix_remap_output_routing(mono_sink_name, actual_master_name)
             return mono_sink_name
         return master_sink
+
+    def _repair_remap_output_after_move(self, mono_sink_name: str) -> None:
+        """Repair remap output routing after app streams are moved.
+
+        The remap output stream (node.name=output.<mono_sink_name>) is often
+        created lazily only after the first sink-input is moved to the remap sink.
+        If WirePlumber has stale routing state, that stream can appear on the
+        wrong sink. Retry briefly so we can correct it once it exists.
+        """
+        for mod in self._list_sinkswitch_remap_modules():
+            if mod.get('sink_name') != mono_sink_name:
+                continue
+            master_name = self._normalize_master_sink_name(mod.get('master', ''))
+            if not master_name:
+                return
+            for _ in range(6):
+                self._fix_remap_output_routing(mono_sink_name, master_name)
+                # Exit early if output stream is already on the desired sink.
+                output_node_name = f"output.{mono_sink_name}"
+                resolved = self._resolve_sink(master_name, allow_managed_remaps=False)
+                if not resolved:
+                    return
+                master_id, _ = resolved
+                try:
+                    si_res = subprocess.run(
+                        host_cmd(['pactl', 'list', 'sink-inputs']),
+                        capture_output=True,
+                        text=True,
+                        **SUBPROCESS_TEXT_KW,
+                        timeout=5,
+                        check=False,
+                    )
+                except Exception:
+                    return
+                if si_res.returncode != 0:
+                    return
+
+                current_sink = None
+                current_node = None
+                found_output = False
+                for raw_line in si_res.stdout.split('\n'):
+                    line = raw_line.strip()
+                    if line.startswith('Sink Input #'):
+                        if current_node == output_node_name:
+                            found_output = True
+                            break
+                        current_sink = None
+                        current_node = None
+                    elif line.startswith('Sink:'):
+                        parts = line.split(':', 1)[1].strip().split()
+                        if parts:
+                            current_sink = parts[0]
+                    elif 'node.name' in line and '=' in line:
+                        current_node = line.split('=', 1)[1].strip().strip('"')
+                if current_node == output_node_name:
+                    found_output = True
+                if found_output and current_sink == master_id:
+                    return
+                time.sleep(0.08)
+            return
 
     def _get_effective_target_sink(self, sink_name: str) -> str:
         """Return sink name to route to, enabling mono for Bluetooth when configured."""
@@ -907,6 +968,11 @@ class AudioRouterEngine:
                         target_sink_id,
                         err or f"exit {move_res.returncode}",
                     )
+
+            # When routing to a mono remap sink, also correct the remap's own
+            # output stream target after app streams are moved (lazy creation).
+            if any_ok and target_sink_name.startswith(self.MONO_REMAP_PREFIX):
+                self._repair_remap_output_after_move(target_sink_name)
             return any_ok
         except Exception as e:
             logger.debug(f"PulseAudio routing failed: {e}")
