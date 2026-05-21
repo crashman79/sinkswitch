@@ -186,11 +186,27 @@ class AudioRouterEngine:
         return self._get_sink_channel_count(sink_name) == 1
 
     def _find_existing_mono_remap_sink(self, master_sink: str) -> Optional[str]:
-        """Return existing mono remap sink name for master_sink, if present."""
+        """Return existing mono remap sink name for master_sink, if present.
+
+        The master= field stored in the module args is the resolved PipeWire sink
+        name (may include profile suffix).  We match by MAC address for Bluetooth
+        sinks so fuzzy-named devices are still recognised.
+        """
         normalized_master = self._normalize_master_sink_name(master_sink)
+        # Extract MAC portion for fuzzy BT matching (XX_XX_XX_XX_XX_XX)
+        bt_mac: Optional[str] = None
+        if 'bluez' in normalized_master.lower():
+            parts = normalized_master.split('.')
+            if len(parts) >= 2:
+                bt_mac = parts[1]
+
         for mod in self._list_sinkswitch_remap_modules():
-            found_master = self._normalize_master_sink_name(mod.get('master', ''))
-            if found_master == normalized_master:
+            mod_master = self._normalize_master_sink_name(mod.get('master', ''))
+            if mod_master == normalized_master:
+                sink_name = mod.get('sink_name', '')
+                if sink_name:
+                    return sink_name
+            if bt_mac and bt_mac in mod_master:
                 sink_name = mod.get('sink_name', '')
                 if sink_name:
                     return sink_name
@@ -199,6 +215,18 @@ class AudioRouterEngine:
     def _ensure_mono_remap_sink(self, master_sink: str) -> str:
         """Create/reuse a mono remap sink for master_sink; return sink to route to."""
         master_sink = self._normalize_master_sink_name(master_sink)
+
+        # Resolve the actual PipeWire sink name for master= so module-remap-sink
+        # wires its output to the correct device.  Without this, if the configured
+        # name differs from the live name (profile suffix, fuzzy match only), pactl
+        # silently loads the module with no master and PipeWire falls back to the
+        # system default sink (typically analog speakers).
+        resolved_master = self._resolve_sink(master_sink, allow_managed_remaps=False)
+        if not resolved_master:
+            logger.warning("Cannot create mono remap sink: master %r not found", master_sink)
+            return master_sink
+        _, actual_master_name = resolved_master
+
         cached = self._mono_sink_cache.get(master_sink)
         if cached and self._resolve_sink(cached):
             return cached
@@ -218,7 +246,7 @@ class AudioRouterEngine:
                 'load-module',
                 'module-remap-sink',
                 f'sink_name={mono_sink_name}',
-                f'master={master_sink}',
+                f'master={actual_master_name}',
                 f'sink_properties=device.description={sink_desc}',
                 'channels=1',
                 'channel_map=mono',
@@ -694,6 +722,14 @@ class AudioRouterEngine:
     ) -> Optional[Tuple[str, str]]:
         """Return (sink_index, sink_name); BT ids match by MAC if PipeWire renumbered suffix."""
         try:
+            requested = (device_name or '').strip()
+            requested_lower = requested.lower()
+            # Only do Bluetooth fuzzy matching for physical bluez sink ids.
+            # Managed mono remap names must resolve exactly.
+            use_bluetooth_fuzzy = (
+                requested_lower.startswith('bluez_output.')
+                and not requested.startswith(self.MONO_REMAP_PREFIX)
+            )
             result = subprocess.run(
                 host_cmd(['pactl', 'list', 'sinks']),
                 capture_output=True,
@@ -709,17 +745,17 @@ class AudioRouterEngine:
                     name_value = line.split('Name:')[1].strip()
                     if (not allow_managed_remaps) and name_value.startswith(self.MONO_REMAP_PREFIX):
                         continue
-                    if device_name in line or name_value == device_name:
+                    if name_value == requested:
                         return (current_sink_id, name_value)
-                    if 'bluez' in device_name.lower() and 'bluez' in name_value.lower():
+                    if use_bluetooth_fuzzy and name_value.lower().startswith('bluez_output.'):
                         if (not allow_managed_remaps) and name_value.startswith(self.MONO_REMAP_PREFIX):
                             continue
-                        parts = device_name.split('.')
+                        parts = requested.split('.')
                         if len(parts) >= 2:
                             mac_address = parts[1]
                             if mac_address in name_value:
                                 logger.debug(
-                                    f"Fuzzy matched Bluetooth sink '{device_name}' to '{name_value}' (sink #{current_sink_id})"
+                                    f"Fuzzy matched Bluetooth sink '{requested}' to '{name_value}' (sink #{current_sink_id})"
                                 )
                                 return (current_sink_id, name_value)
             return None
