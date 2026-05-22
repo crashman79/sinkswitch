@@ -555,9 +555,11 @@ class DeviceMonitor:
             return False
         event_occurred = threading.Event()
         debounce_sec = 0.12
+        sink_input_followup_sec = 0.35
         bt_interval_sec = 30.0
         last_bt = time.time()
         force_apply = threading.Event()
+        pending_sink_input_followup_at: Optional[float] = None
 
         def read_events():
             try:
@@ -595,16 +597,36 @@ class DeviceMonitor:
                 timeout = max(0.1, min(timeout, 1.0))
                 if event_occurred.wait(timeout=timeout):
                     event_occurred.clear()
-                    time.sleep(debounce_sec)
+                    immediate_apply = force_apply.is_set()
+                    # Apply sink-input events immediately so new streams do not
+                    # audibly linger on the default sink first.
+                    if not immediate_apply:
+                        time.sleep(debounce_sec)
                     if stop_event and stop_event.is_set():
                         break
                     self._run_watch_iteration(
                         callback,
                         config_regen_callback,
                         rules_ref,
-                        force_apply=force_apply.is_set(),
+                        force_apply=immediate_apply,
                     )
+                    if immediate_apply:
+                        # Some apps replace a sink-input moments after teardown.
+                        # Schedule one near-term follow-up apply to catch the
+                        # recreated stream even if no second event is emitted.
+                        pending_sink_input_followup_at = time.time() + sink_input_followup_sec
                     force_apply.clear()
+                now = time.time()
+                if pending_sink_input_followup_at and now >= pending_sink_input_followup_at:
+                    pending_sink_input_followup_at = None
+                    if stop_event and stop_event.is_set():
+                        break
+                    self._run_watch_iteration(
+                        callback,
+                        config_regen_callback,
+                        rules_ref,
+                        force_apply=True,
+                    )
                 if now - last_bt >= bt_interval_sec:
                     last_bt = now
                     self._run_watch_iteration(callback, config_regen_callback, rules_ref)

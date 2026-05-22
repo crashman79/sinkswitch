@@ -515,10 +515,6 @@ class AudioRouterEngine:
                     'message': f"Target device not connected: {target_label}"
                 }
             
-            # For Bluetooth devices, prefer A2DP profile
-            if 'bluez' in connected_target:
-                self._ensure_a2dp_profile(connected_target)
-            
             # Get applications to match
             applications = rule.get('applications', [])
             keywords = rule.get('application_keywords', [])
@@ -532,6 +528,10 @@ class AudioRouterEngine:
                 keywords,
                 effective_targets
             )
+            # Keep profile maintenance off the routing hot path so stream moves
+            # happen first for newly created browser/media sink-inputs.
+            if 'bluez' in connected_target:
+                self._ensure_a2dp_profile(connected_target)
             target_label = connected_target
             for d in self.device_monitor.get_devices():
                 if d.get('id') == connected_target:
