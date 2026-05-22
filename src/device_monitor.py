@@ -40,6 +40,20 @@ class DeviceMonitor:
         self.last_config_regeneration = 0  # Timestamp of last config regeneration
         self.config_regeneration_cooldown = 10  # Minimum seconds between regenerations
         self._last_periodic_rule_apply_ts = 0.0
+        self._last_bt_profile_monitor_ts = 0.0
+        self._bt_profile_monitor_interval_sec = 5.0
+
+    def _maybe_monitor_bluetooth_profiles(self, current_devices: List[Dict], force: bool = False) -> None:
+        """Run Bluetooth profile maintenance on a low-frequency cadence.
+
+        This keeps stream routing responsive for new sink-input events while still
+        performing periodic A2DP restoration checks.
+        """
+        now = time.time()
+        if not force and (now - self._last_bt_profile_monitor_ts) < self._bt_profile_monitor_interval_sec:
+            return
+        self._last_bt_profile_monitor_ts = now
+        self._monitor_bluetooth_profiles(current_devices)
 
     def _detect_audio_backend(self):
         """Detect which audio backend is available (PipeWire or PulseAudio)"""
@@ -447,12 +461,11 @@ class DeviceMonitor:
         callback: Callable,
         config_regen_callback: Optional[Callable],
         rules_ref: Optional[List[Dict]],
+        force_apply: bool = False,
     ) -> None:
         """One iteration: fetch state, optional config regen, relevance check, callback if needed."""
         current_devices = self.get_devices()
         current_streams = self._get_audio_streams()
-
-        self._monitor_bluetooth_profiles(current_devices)
 
         if config_regen_callback and self._is_significant_device_change(current_devices):
             time_since_last = time.time() - self.last_config_regeneration
@@ -478,9 +491,11 @@ class DeviceMonitor:
             device_changed = device_changed and rule_target_ids and self._device_change_involves_rules(current_devices, rule_target_ids)
             stream_changed = stream_changed and self._stream_change_involves_rules(current_streams, rules_ref)
 
-        if periodic_rules or device_changed or stream_changed:
+        if force_apply or periodic_rules or device_changed or stream_changed:
             if periodic_rules and not device_changed and not stream_changed:
                 logger.debug("Periodic routing re-apply")
+            elif force_apply and not device_changed and not stream_changed:
+                logger.debug("Immediate routing re-apply due to stream event")
             elif device_changed and stream_changed:
                 logger.info("Devices and audio streams changed - applying routing rules")
             elif device_changed:
@@ -491,7 +506,10 @@ class DeviceMonitor:
             self.last_streams = current_streams
             callback()
 
-    def watch_devices(self, callback: Callable, interval: int = 5, config_regen_callback: Optional[Callable] = None, stop_event: Optional[threading.Event] = None, rules_ref: Optional[List[Dict]] = None):
+        # Keep BT profile maintenance out of the hot path for stream routing.
+        self._maybe_monitor_bluetooth_profiles(current_devices)
+
+    def watch_devices(self, callback: Callable, interval: int = 2, config_regen_callback: Optional[Callable] = None, stop_event: Optional[threading.Event] = None, rules_ref: Optional[List[Dict]] = None):
         """Watch for device changes and call callback when changes detected.
 
         Uses pactl subscribe (event-based) when available for low latency and no polling;
@@ -536,9 +554,10 @@ class DeviceMonitor:
             logger.debug("pactl subscribe not available: %s", e)
             return False
         event_occurred = threading.Event()
-        debounce_sec = 0.5
+        debounce_sec = 0.12
         bt_interval_sec = 30.0
         last_bt = time.time()
+        force_apply = threading.Event()
 
         def read_events():
             try:
@@ -546,9 +565,13 @@ class DeviceMonitor:
                     if stop_event and stop_event.is_set():
                         break
                     line = (line or '').strip().lower()
-                    if not line or line.startswith('Event '):
+                    if not line:
                         continue
-                    if 'sink' in line or 'server' in line:
+                    if 'sink-input' in line:
+                        force_apply.set()
+                        event_occurred.set()
+                        continue
+                    if 'sink' in line or 'server' in line or 'card' in line:
                         event_occurred.set()
             except Exception as e:
                 logger.debug("pactl subscribe read error: %s", e)
@@ -575,7 +598,13 @@ class DeviceMonitor:
                     time.sleep(debounce_sec)
                     if stop_event and stop_event.is_set():
                         break
-                    self._run_watch_iteration(callback, config_regen_callback, rules_ref)
+                    self._run_watch_iteration(
+                        callback,
+                        config_regen_callback,
+                        rules_ref,
+                        force_apply=force_apply.is_set(),
+                    )
+                    force_apply.clear()
                 if now - last_bt >= bt_interval_sec:
                     last_bt = now
                     self._run_watch_iteration(callback, config_regen_callback, rules_ref)
