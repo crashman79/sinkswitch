@@ -27,6 +27,7 @@ class AudioRouterEngine:
         self.auto_mono_single_channel_bluetooth = auto_mono_single_channel_bluetooth
         self.force_bluetooth_mono = force_bluetooth_mono
         self._mono_sink_cache: Dict[str, str] = {}
+        self._mono_master_sink_id_cache: Dict[str, str] = {}
         self._required_mono_masters: Set[str] = set()
         # Clean stale remap modules from earlier sessions.
         self._cleanup_sinkswitch_remaps(startup=True)
@@ -105,7 +106,14 @@ class AudioRouterEngine:
             return states
 
     def _cleanup_sinkswitch_remaps(self, startup: bool = False) -> None:
-        """Unload stale SinkSwitch mono remap modules."""
+        """Unload stale SinkSwitch mono remap modules.
+
+        Runtime unload/reload churn can introduce audible fallback-to-default
+        windows when browsers recreate streams. Keep remaps stable during normal
+        operation and only perform destructive cleanup at startup/shutdown.
+        """
+        if not startup:
+            return
         modules = self._list_sinkswitch_remap_modules()
         if not modules:
             return
@@ -179,6 +187,61 @@ class AudioRouterEngine:
         except Exception as e:
             logger.debug(f"Failed to read channel count for sink {sink_name}: {e}")
             return None
+
+    @staticmethod
+    def _sink_state_rank(state: str) -> int:
+        """Lower rank means a better sink candidate for immediate routing."""
+        normalized = (state or '').strip().upper()
+        if normalized == 'RUNNING':
+            return 0
+        if normalized == 'IDLE':
+            return 1
+        if normalized == 'SUSPENDED':
+            return 2
+        if normalized == 'UNKNOWN':
+            return 3
+        if normalized == 'UNAVAILABLE':
+            return 9
+        return 4
+
+    def _prioritize_target_sinks(self, preferred_target: str, all_targets: List[str]) -> List[str]:
+        """Sort target sink ids so active/available Bluetooth variants are tried first."""
+        deduped: List[str] = []
+        seen: Set[str] = set()
+        for target in all_targets:
+            if not target or target in seen:
+                continue
+            deduped.append(target)
+            seen.add(target)
+
+        if not deduped:
+            return []
+
+        sink_states = self._get_sink_states()
+        default_sink_name = self.device_monitor.get_default_sink() or ''
+
+        # Keep non-Bluetooth ordering stable to avoid behavior changes elsewhere.
+        if not any('bluez' in target.lower() for target in deduped):
+            return deduped
+
+        preferred_state = sink_states.get(preferred_target, 'UNKNOWN')
+        if preferred_state.upper() == 'UNAVAILABLE':
+            preferred_state = 'UNKNOWN'
+
+        scored: List[Tuple[Tuple[int, int, int, int], str]] = []
+        for index, target in enumerate(deduped):
+            resolved = self._resolve_sink(target, allow_managed_remaps=False)
+            resolved_name = resolved[1] if resolved else target
+            state = sink_states.get(resolved_name, sink_states.get(target, 'UNKNOWN'))
+            unavailable_penalty = 1 if state.upper() == 'UNAVAILABLE' else 0
+            default_bonus = 0 if (default_sink_name and resolved_name == default_sink_name) else 1
+            state_rank = self._sink_state_rank(state)
+            preferred_bonus = 0 if (target == preferred_target and preferred_state.upper() != 'UNAVAILABLE') else 1
+            score = (unavailable_penalty, default_bonus, state_rank, preferred_bonus, index)
+            scored.append((score, target))
+
+        scored.sort(key=lambda item: item[0])
+        return [target for _, target in scored]
 
     def _is_single_channel_bluetooth_sink(self, sink_name: str) -> bool:
         """Detect Bluetooth sinks that currently report one output channel."""
@@ -275,6 +338,34 @@ class AudioRouterEngine:
         except Exception as e:
             logger.debug("_fix_remap_output_routing error: %s", e)
 
+    def _unload_mono_remap_sink(self, mono_sink_name: str) -> bool:
+        """Unload one SinkSwitch mono remap module by sink name."""
+        for mod in self._list_sinkswitch_remap_modules():
+            if mod.get('sink_name') != mono_sink_name:
+                continue
+            module_id = mod.get('id', '')
+            if not module_id:
+                return False
+            unload_res = subprocess.run(
+                host_cmd(['pactl', 'unload-module', module_id]),
+                capture_output=True,
+                text=True,
+                **SUBPROCESS_TEXT_KW,
+                timeout=5,
+                check=False,
+            )
+            if unload_res.returncode == 0:
+                logger.info("Unloaded stale Bluetooth mono remap sink %s", mono_sink_name)
+                return True
+            err = (unload_res.stderr or unload_res.stdout or '').strip()
+            logger.warning(
+                "Failed to unload stale mono remap sink %s: %s",
+                mono_sink_name,
+                err or f"exit {unload_res.returncode}",
+            )
+            return False
+        return False
+
     def _ensure_mono_remap_sink(self, master_sink: str) -> str:
         """Create/reuse a mono remap sink for master_sink; return sink to route to."""
         master_sink = self._normalize_master_sink_name(master_sink)
@@ -288,16 +379,34 @@ class AudioRouterEngine:
         if not resolved_master:
             logger.warning("Cannot create mono remap sink: master %r not found", master_sink)
             return master_sink
-        _, actual_master_name = resolved_master
+        actual_master_id, actual_master_name = resolved_master
+        is_bluetooth_master = 'bluez' in actual_master_name.lower()
+        previous_master_id = self._mono_master_sink_id_cache.get(master_sink)
+
+        if is_bluetooth_master and previous_master_id and previous_master_id != actual_master_id:
+            stale_cached = self._mono_sink_cache.pop(master_sink, None)
+            if stale_cached:
+                self._unload_mono_remap_sink(stale_cached)
+            stale_existing = self._find_existing_mono_remap_sink(master_sink)
+            if stale_existing:
+                self._unload_mono_remap_sink(stale_existing)
+            logger.info(
+                "Bluetooth sink instance changed for %s (%s -> %s); forcing mono remap rebuild",
+                master_sink,
+                previous_master_id,
+                actual_master_id,
+            )
 
         cached = self._mono_sink_cache.get(master_sink)
         if cached and self._resolve_sink(cached):
+            self._mono_master_sink_id_cache[master_sink] = actual_master_id
             self._fix_remap_output_routing(cached, actual_master_name)
             return cached
 
         existing = self._find_existing_mono_remap_sink(master_sink)
         if existing and self._resolve_sink(existing):
             self._mono_sink_cache[master_sink] = existing
+            self._mono_master_sink_id_cache[master_sink] = actual_master_id
             self._fix_remap_output_routing(existing, actual_master_name)
             return existing
 
@@ -335,6 +444,7 @@ class AudioRouterEngine:
 
         if self._resolve_sink(mono_sink_name):
             self._mono_sink_cache[master_sink] = mono_sink_name
+            self._mono_master_sink_id_cache[master_sink] = actual_master_id
             self._fix_remap_output_routing(mono_sink_name, actual_master_name)
             return mono_sink_name
         return master_sink
@@ -451,7 +561,23 @@ class AudioRouterEngine:
         except Exception as e:
             logger.debug(f"Failed to ensure A2DP profile: {e}")
             return False
-    
+
+    def _generate_fallback_rules(self) -> List[Dict]:
+        """Auto-generate routing rules from connected devices when none are configured."""
+        try:
+            from intelligent_audio_router import IntelligentAudioRouter
+            config = IntelligentAudioRouter().generate_routing_config()
+            rules = config.get('routing_rules', [])
+            if rules:
+                logger.info(
+                    "No routing rules configured; using %d auto-generated rule(s)",
+                    len(rules),
+                )
+            return rules
+        except Exception as e:
+            logger.debug("Failed to generate fallback rules: %s", e)
+            return []
+
     def apply_rules(self, rules: List[Dict]) -> List[Dict]:
         """Apply routing rules to audio streams
         
@@ -461,6 +587,9 @@ class AudioRouterEngine:
         Returns:
             List of result dictionaries with success status and messages
         """
+        if not rules:
+            rules = self._generate_fallback_rules()
+
         results = []
         self._required_mono_masters = set()
         
@@ -486,38 +615,58 @@ class AudioRouterEngine:
         rule_name = rule.get('name', 'Unknown')
         target_device = rule.get('target_device')
         target_variants = rule.get('target_device_variants', [])
+        applications = rule.get('applications', [])
+        keywords = rule.get('application_keywords', [])
         
         # Build list of all target devices to try
         all_targets = [target_device]
         if target_variants:
             all_targets = target_variants
+        all_targets = self._prioritize_target_sinks(target_device, all_targets)
+
+        # Try to restore A2DP before selecting a sink variant, so we avoid
+        # routing streams into non-playback Bluetooth profiles.
+        first_bluetooth_target = next(
+            (target for target in all_targets if 'bluez' in (target or '').lower()),
+            None,
+        )
+        if first_bluetooth_target:
+            self._ensure_a2dp_profile(first_bluetooth_target)
+            all_targets = self._prioritize_target_sinks(target_device, all_targets)
         
         try:
-            # Check if any target device variant is connected
-            device_connected = False
-            connected_target = None
-            
-            for target in all_targets:
-                if self.device_monitor.device_connected(target):
-                    device_connected = True
-                    connected_target = target
-                    break
-            
-            if not device_connected:
-                target_label = target_device
-                for d in self.device_monitor.get_devices():
-                    if d.get('id') == target_device:
-                        target_label = d.get('friendly_name') or d.get('name') or target_device
-                        break
+            if not all_targets:
                 return {
                     'rule_name': rule_name,
                     'success': False,
-                    'message': f"Target device not connected: {target_label}"
+                    'message': 'No target device configured for this rule',
                 }
-            
-            # Get applications to match
-            applications = rule.get('applications', [])
-            keywords = rule.get('application_keywords', [])
+
+            # Pick the best currently reachable target for status messaging,
+            # but do not abort routing if resolution is temporarily stale.
+            connected_target = all_targets[0]
+            sink_states = self._get_sink_states()
+            target_probe: List[Tuple[str, str, str, str]] = []
+            for target in all_targets:
+                resolved = self._resolve_sink(target, allow_managed_remaps=False)
+                if not resolved:
+                    target_probe.append((target, 'missing', '-', '-'))
+                    continue
+                _, sink_name = resolved
+                sink_state = sink_states.get(sink_name, 'UNKNOWN').upper()
+                target_probe.append((target, 'resolved', sink_name, sink_state))
+                if sink_state == 'UNAVAILABLE':
+                    continue
+                connected_target = target
+                break
+            logger.debug(
+                "Rule %r target resolution: preferred=%r bt_target=%r probes=%s connected_choice=%r",
+                rule_name,
+                target_device,
+                first_bluetooth_target,
+                target_probe,
+                connected_target,
+            )
             
             # Route matching applications to target device (try all variants)
             effective_targets: List[str] = []
@@ -528,6 +677,15 @@ class AudioRouterEngine:
                 keywords,
                 effective_targets
             )
+            logger.debug(
+                "Rule %r route result: routed=%s effective_targets=%s apps=%s keywords=%s",
+                rule_name,
+                routed,
+                effective_targets,
+                applications,
+                keywords,
+            )
+
             # Keep profile maintenance off the routing hot path so stream moves
             # happen first for newly created browser/media sink-inputs.
             if 'bluez' in connected_target:
@@ -573,8 +731,10 @@ class AudioRouterEngine:
             running_apps = self._get_running_applications()
             
             # Find matching applications
+            matched_apps = 0
             for app_name in running_apps:
                 if self._matches_rule(app_name, applications, keywords):
+                    matched_apps += 1
                     logger.debug(f"App '{app_name}' matches rule, routing to {target_devices[0]}")
                     # Try each target device variant until one succeeds
                     for target_device in target_devices:
@@ -583,6 +743,14 @@ class AudioRouterEngine:
                             break
                 else:
                     logger.debug(f"App '{app_name}' does NOT match rule")
+
+            logger.debug(
+                "Route pass summary: running_apps=%s matched_apps=%s routed=%s targets=%s",
+                len(running_apps),
+                matched_apps,
+                routed_count,
+                target_devices,
+            )
             
             return routed_count
         
@@ -950,6 +1118,8 @@ class AudioRouterEngine:
             )
             
             to_move: List[tuple] = []
+            matched_inputs = 0
+            already_on_target = 0
             current_sink_input = None
             current_sink_num = None
             
@@ -963,11 +1133,21 @@ class AudioRouterEngine:
                     if len(parts) > 1:
                         current_sink_num = parts[1].strip().split()[0] if parts[1].strip() else None
                 elif current_sink_input and 'application.name' in line and app_name in line:
+                    matched_inputs += 1
                     if current_sink_num is None or current_sink_num != target_sink_id:
                         to_move.append((current_sink_input, current_sink_num))
+                    else:
+                        already_on_target += 1
             
             if not to_move:
-                logger.debug(f"No sink inputs to move for {app_name} (missing or already on target)")
+                logger.debug(
+                    "No sink-input moves for app %r -> %s (#%s); matched_inputs=%s already_on_target=%s",
+                    app_name,
+                    target_sink_name,
+                    target_sink_id,
+                    matched_inputs,
+                    already_on_target,
+                )
                 return False
 
             any_ok = False
