@@ -29,6 +29,7 @@ class AudioDevice:
 
 class DeviceMonitor:
     """Monitor and detect audio output devices"""
+    MANAGED_MONO_PREFIX = 'sinkswitch_mono.'
     
     def __init__(self):
         self.devices = {}
@@ -42,6 +43,8 @@ class DeviceMonitor:
         self._last_periodic_rule_apply_ts = 0.0
         self._last_bt_profile_monitor_ts = 0.0
         self._bt_profile_monitor_interval_sec = 5.0
+        self._last_bt_auto_repair_ts_by_mac: Dict[str, float] = {}
+        self._bt_auto_repair_cooldown_sec = 90.0
 
     def _maybe_monitor_bluetooth_profiles(self, current_devices: List[Dict], force: bool = False) -> None:
         """Run Bluetooth profile maintenance on a low-frequency cadence.
@@ -232,18 +235,45 @@ class DeviceMonitor:
         if not card_info:
             return False
         
-        # Check if already in A2DP profile
         active_profile = card_info.get('active_profile', '')
         if active_profile.startswith('a2dp'):
             logger.debug(f"Already in A2DP profile: {active_profile}")
             return True
         
-        # Find best A2DP profile (prefer aptX > AAC > SBC-XQ > SBC)
-        a2dp_priority = ['a2dp-sink', 'a2dp-sink-aac', 'a2dp-sink-sbc_xq', 'a2dp-sink-sbc']
+        # Prefer stable codecs; aptX is a last resort due to auth failures.
+        a2dp_priority = ['a2dp-sink-aac', 'a2dp-sink-sbc_xq', 'a2dp-sink-sbc', 'a2dp-sink']
+        profiles = card_info.get('profiles', {})
+
         for profile in a2dp_priority:
-            if profile in card_info.get('profiles', {}):
+            if profile in profiles:
                 return self.set_bluetooth_profile(card_info['name'], profile)
-        
+
+        # No A2DP profiles listed — device likely auto-connected on HFP first (BlueZ
+        # race condition).  Release the current transport, then request A2DP.
+        card_name = card_info.get('name', '')
+        if not card_name:
+            return False
+        logger.info(
+            "No A2DP profiles available for %s; soft-toggling via profile off",
+            device_address,
+        )
+        if not self.set_bluetooth_profile(card_name, 'off'):
+            return False
+        time.sleep(0.5)
+
+        card_info = self.get_bluetooth_card_info(device_address)
+        if not card_info:
+            return False
+        profiles = card_info.get('profiles', {})
+        for profile in a2dp_priority:
+            if profile in profiles:
+                logger.info(
+                    "A2DP profile %s available after soft toggle for %s",
+                    profile, device_address,
+                )
+                return self.set_bluetooth_profile(card_info['name'], profile)
+
+        logger.warning("A2DP still unavailable after soft toggle for %s", device_address)
         return False
 
     def _classify_device_type(self, device: Dict) -> str:
@@ -335,9 +365,10 @@ class DeviceMonitor:
                     elif key == 'description':
                         current_device['description'] = value
                     elif key == 'state':
-                        # SUSPENDED is normal (no audio playing), only treat IDLE/UNAVAILABLE as disconnected
+                        # PipeWire often reports IDLE/SUSPENDED for healthy sinks with no active stream.
+                        # Only mark truly unavailable sinks as disconnected.
                         state = value.lower()
-                        current_device['connected'] = state not in ['idle', 'unavailable']
+                        current_device['connected'] = state != 'unavailable'
                     else:
                         current_device['properties'][key] = value
             
@@ -642,23 +673,30 @@ class DeviceMonitor:
     
     def _devices_changed(self, current_devices: List[Dict]) -> bool:
         """Check if device list has changed"""
-        if not self.last_devices and current_devices:
+        relevant_current = [
+            d for d in current_devices if not self._is_internal_managed_sink_id(d.get('id', ''))
+        ]
+        relevant_last = [
+            d for d in self.last_devices if not self._is_internal_managed_sink_id(d.get('id', ''))
+        ]
+
+        if not relevant_last and relevant_current:
             self.last_devices = current_devices
             return True
-        
-        if len(current_devices) != len(self.last_devices):
+
+        if len(relevant_current) != len(relevant_last):
             return True
-        
-        current_ids = {d.get('id') for d in current_devices if d.get('id')}
-        last_ids = {d.get('id') for d in self.last_devices if d.get('id')}
+
+        current_ids = {d.get('id') for d in relevant_current if d.get('id')}
+        last_ids = {d.get('id') for d in relevant_last if d.get('id')}
         
         if current_ids != last_ids:
             return True
         
         # Check connection state changes
-        for device in current_devices:
+        for device in relevant_current:
             last_device = next(
-                (d for d in self.last_devices if d.get('id') == device.get('id')),
+                (d for d in relevant_last if d.get('id') == device.get('id')),
                 None
             )
             if last_device and device.get('connected') != last_device.get('connected'):
@@ -753,10 +791,19 @@ class DeviceMonitor:
     @staticmethod
     def _bluez_mac_from_sink_id(sink_id: str) -> Optional[str]:
         """MAC segment from e.g. bluez_output.00_02_3C_AD_09_85.2 → 00_02_3C_AD_09_85."""
-        if not sink_id or 'bluez' not in sink_id.lower():
+        if not sink_id:
+            return None
+        lowered = sink_id.lower()
+        if lowered.startswith(DeviceMonitor.MANAGED_MONO_PREFIX):
+            return None
+        if 'bluez' not in lowered:
             return None
         parts = sink_id.split('.')
         return parts[1] if len(parts) >= 2 else None
+
+    @classmethod
+    def _is_internal_managed_sink_id(cls, sink_id: str) -> bool:
+        return (sink_id or '').lower().startswith(cls.MANAGED_MONO_PREFIX)
 
     def _bluez_macs_from_rule_targets(self, rule_target_ids: Set[str]) -> Set[str]:
         return {m for tid in rule_target_ids if (m := self._bluez_mac_from_sink_id(tid))}
@@ -873,6 +920,8 @@ class DeviceMonitor:
         
         # Filter to only significant device types
         def is_significant(device_id: str) -> bool:
+            if self._is_internal_managed_sink_id(device_id):
+                return False
             return 'bluez' in device_id.lower() or 'usb' in device_id.lower()
         
         significant_added = any(is_significant(d) for d in added)
@@ -894,6 +943,8 @@ class DeviceMonitor:
             # Get all Bluetooth devices
             for device in current_devices:
                 device_id = device.get('id', '')
+                if self._is_internal_managed_sink_id(device_id):
+                    continue
                 if 'bluez' not in device_id:
                     continue
                 
@@ -945,6 +996,121 @@ class DeviceMonitor:
         
         except Exception as e:
             logger.debug(f"Error monitoring Bluetooth profiles: {e}")
+
+        # If BlueZ still reports a device connected but PipeWire has no sink node,
+        # perform a conservative self-heal (disconnect/connect) with cooldown.
+        try:
+            self._maybe_auto_repair_bluetooth_audio(current_devices)
+        except Exception as e:
+            logger.debug(f"Error running Bluetooth auto-repair check: {e}")
+
+    def _bluez_mac_to_colon(self, mac_underscore: str) -> str:
+        return (mac_underscore or '').replace('_', ':').upper()
+
+    def _bluez_has_any_sink_for_mac(self, current_devices: List[Dict], mac_underscore: str) -> bool:
+        if not mac_underscore:
+            return False
+        needle = mac_underscore.upper()
+        for d in current_devices:
+            did = (d.get('id') or '').upper()
+            if did.startswith('BLUEZ_OUTPUT.') and needle in did:
+                return True
+        return False
+
+    def _bluetoothctl_connected(self, mac_colon: str) -> bool:
+        if not mac_colon:
+            return False
+        try:
+            res = subprocess.run(
+                host_cmd(['bluetoothctl', 'info', mac_colon]),
+                capture_output=True,
+                text=True,
+                **SUBPROCESS_TEXT_KW,
+                timeout=5,
+                check=False,
+            )
+            if res.returncode != 0:
+                return False
+            out = (res.stdout or '').lower()
+            return 'connected: yes' in out
+        except Exception as e:
+            logger.debug(f"bluetoothctl info failed for {mac_colon}: {e}")
+            return False
+
+    def _repair_bluetooth_audio_for_mac(self, mac_colon: str, wait_sec: float = 7.0) -> bool:
+        """Disconnect/reconnect one Bluetooth device and wait for any bluez_output sink."""
+        try:
+            disc = subprocess.run(
+                host_cmd(['bluetoothctl', 'disconnect', mac_colon]),
+                capture_output=True,
+                text=True,
+                **SUBPROCESS_TEXT_KW,
+                timeout=8,
+                check=False,
+            )
+            conn = subprocess.run(
+                host_cmd(['bluetoothctl', 'connect', mac_colon]),
+                capture_output=True,
+                text=True,
+                **SUBPROCESS_TEXT_KW,
+                timeout=12,
+                check=False,
+            )
+            if conn.returncode != 0:
+                err = (conn.stderr or conn.stdout or '').strip()
+                logger.warning("Bluetooth auto-repair connect failed for %s: %s", mac_colon, err or conn.returncode)
+                return False
+
+            mac_us = mac_colon.replace(':', '_').upper()
+            deadline = time.time() + wait_sec
+            while time.time() < deadline:
+                if self._bluez_has_any_sink_for_mac(self.get_devices(), mac_us):
+                    logger.info("Bluetooth auto-repair recovered sink for %s", mac_colon)
+                    return True
+                time.sleep(0.35)
+
+            logger.warning("Bluetooth auto-repair did not recover sink in time for %s", mac_colon)
+            return False
+        except Exception as e:
+            logger.warning("Bluetooth auto-repair failed for %s: %s", mac_colon, e)
+            return False
+
+    def _maybe_auto_repair_bluetooth_audio(self, current_devices: List[Dict]) -> None:
+        """Auto-repair missing BT audio sink when BlueZ says connected (cooldown-limited)."""
+        # Candidates come from currently visible BT sinks and known profile-state MACs.
+        macs_us: Set[str] = set()
+        for d in current_devices:
+            did = d.get('id') or ''
+            if 'bluez_output.' not in did.lower():
+                continue
+            parts = did.split('.')
+            if len(parts) >= 2 and parts[1]:
+                macs_us.add(parts[1].upper())
+        for mac_us in self.bluetooth_profile_state.keys():
+            if mac_us:
+                macs_us.add(mac_us.upper())
+
+        if not macs_us:
+            return
+
+        now = time.time()
+        for mac_us in sorted(macs_us):
+            if self._bluez_has_any_sink_for_mac(current_devices, mac_us):
+                continue
+            mac_colon = self._bluez_mac_to_colon(mac_us)
+            if not self._bluetoothctl_connected(mac_colon):
+                continue
+
+            last = self._last_bt_auto_repair_ts_by_mac.get(mac_colon, 0.0)
+            if (now - last) < self._bt_auto_repair_cooldown_sec:
+                continue
+
+            logger.warning(
+                "Detected connected Bluetooth device without PipeWire sink (%s); attempting auto-repair",
+                mac_colon,
+            )
+            self._last_bt_auto_repair_ts_by_mac[mac_colon] = now
+            self._repair_bluetooth_audio_for_mac(mac_colon)
     
     def _check_active_mic_streams(self) -> bool:
         """Check if there are any active microphone/source streams
