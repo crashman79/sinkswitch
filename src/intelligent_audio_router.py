@@ -191,8 +191,10 @@ class IntelligentAudioRouter:
                                 if not all_sinks:
                                     all_sinks = [target_device]
                                 
-                                # Force A2DP profile for high-fidelity audio
-                                self.device_monitor.prefer_a2dp_profile(device_address_colon)
+                                # Force A2DP profile for high-fidelity audio.
+                                # Non-destructive: never soft-toggle the transport
+                                # while generating config on the main thread.
+                                self.device_monitor.prefer_a2dp_profile(device_address_colon, allow_soft_toggle=False)
                                 logger.info(f"Bluetooth device has {len(all_sinks)} sink(s): {all_sinks}")
                     
                     # Create rule with all sink variants
