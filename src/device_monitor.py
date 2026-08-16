@@ -30,6 +30,7 @@ class AudioDevice:
 class DeviceMonitor:
     """Monitor and detect audio output devices"""
     MANAGED_MONO_PREFIX = 'sinkswitch_mono.'
+    _backend_cache: Optional[str] = None
     
     def __init__(self):
         self.devices = {}
@@ -45,6 +46,8 @@ class DeviceMonitor:
         self._bt_profile_monitor_interval_sec = 5.0
         self._last_bt_auto_repair_ts_by_mac: Dict[str, float] = {}
         self._bt_auto_repair_cooldown_sec = 90.0
+        self._last_bt_a2dp_soft_toggle_ts_by_mac: Dict[str, float] = {}
+        self._bt_a2dp_soft_toggle_cooldown_sec = 45.0
 
     def _maybe_monitor_bluetooth_profiles(self, current_devices: List[Dict], force: bool = False) -> None:
         """Run Bluetooth profile maintenance on a low-frequency cadence.
@@ -58,18 +61,62 @@ class DeviceMonitor:
         self._last_bt_profile_monitor_ts = now
         self._monitor_bluetooth_profiles(current_devices)
 
+    def _get_connected_bluetooth_macs(self) -> Set[str]:
+        """Return MAC addresses for Bluetooth devices that are connected in BlueZ.
+
+        This is used as a fallback when a device's audio sink disappears because the
+        profile has dropped to off, so the monitor can still recover it.
+        """
+        try:
+            result = subprocess.run(
+                host_cmd(['bluetoothctl', 'devices']),
+                capture_output=True,
+                text=True,
+                **SUBPROCESS_TEXT_KW,
+                timeout=5,
+                check=False,
+            )
+            if result.returncode != 0:
+                return set()
+
+            macs: Set[str] = set()
+            for line in (result.stdout or '').splitlines():
+                stripped = line.strip()
+                if not stripped.startswith('Device '):
+                    continue
+                parts = stripped.split(None, 2)
+                if len(parts) < 2:
+                    continue
+                mac_colon = parts[1].strip().upper()
+                if self._bluetoothctl_connected(mac_colon):
+                    macs.add(mac_colon.replace(':', '_'))
+            return macs
+        except Exception as e:
+            logger.debug(f"Failed to enumerate connected Bluetooth devices: {e}")
+            return set()
+
     def _detect_audio_backend(self):
-        """Detect which audio backend is available (PipeWire or PulseAudio)"""
+        """Detect which audio backend is available (PipeWire or PulseAudio).
+
+        Never raises: a hanging ``pw-cli info`` (common while the audio server is
+        momentarily wedged during a Bluetooth profile switch) must not escape the
+        constructor and abort the GUI via a PyQt slot. The result is cached so
+        short-lived DeviceMonitor instances (e.g. from GUI refresh slots) do not
+        repeatedly run a subprocess on the main thread.
+        """
+        if self._backend_cache is not None:
+            self.backend = self._backend_cache
+            return
         try:
             subprocess.run(host_cmd(['pw-cli', 'info']),
                           capture_output=True,
                           check=False,
                           timeout=2)
-            self.backend = 'pipewire'
-            logger.debug("Detected PipeWire audio backend")
-        except FileNotFoundError:
-            self.backend = 'pulseaudio'
-            logger.debug("Detected PulseAudio audio backend")
+            DeviceMonitor._backend_cache = 'pipewire'
+        except Exception:
+            DeviceMonitor._backend_cache = 'pulseaudio'
+        self.backend = DeviceMonitor._backend_cache
+        logger.debug("Detected %s audio backend", self.backend)
     
     def get_devices(self) -> List[Dict]:
         """Get list of available audio output devices"""
@@ -222,24 +269,34 @@ class DeviceMonitor:
             logger.error(f"Failed to set Bluetooth profile: {e}")
             return False
     
-    def prefer_a2dp_profile(self, device_address: str) -> bool:
-        """Force Bluetooth device to use A2DP (high-fidelity) profile if available
-        
+    def prefer_a2dp_profile(self, device_address: str, allow_soft_toggle: bool = True) -> bool:
+        """Force Bluetooth device to use A2DP (high-fidelity) profile if available.
+
+        When A2DP is already listed on the card this simply switches to it.
+        When A2DP is missing (device auto-connected on HFP due to the BlueZ
+        race) and ``allow_soft_toggle`` is True, it releases the transport via
+        ``set-card-profile off`` and retries, with a cooldown so we never churn
+        the card on every routing pass. On failure the previous profile is
+        restored so the headset keeps producing audio instead of being left off.
+
         Args:
             device_address: Bluetooth MAC address with colons (e.g., '00:02:3C:AD:09:85')
-        
+            allow_soft_toggle: Allow the destructive off→a2dp toggle. Routing hot
+                paths pass False so they never disrupt the audio server; profile
+                recovery is handled by the low-frequency monitor instead.
+
         Returns:
             True if A2DP profile was set successfully
         """
         card_info = self.get_bluetooth_card_info(device_address)
         if not card_info:
             return False
-        
+
         active_profile = card_info.get('active_profile', '')
         if active_profile.startswith('a2dp'):
             logger.debug(f"Already in A2DP profile: {active_profile}")
             return True
-        
+
         # Prefer stable codecs; aptX is a last resort due to auth failures.
         a2dp_priority = ['a2dp-sink-aac', 'a2dp-sink-sbc_xq', 'a2dp-sink-sbc', 'a2dp-sink']
         profiles = card_info.get('profiles', {})
@@ -250,31 +307,71 @@ class DeviceMonitor:
 
         # No A2DP profiles listed — device likely auto-connected on HFP first (BlueZ
         # race condition).  Release the current transport, then request A2DP.
+        if not allow_soft_toggle:
+            return False
+
         card_name = card_info.get('name', '')
         if not card_name:
             return False
+
+        # Never churn the card: only one soft-toggle attempt per device per cooldown.
+        mac_key = device_address.upper()
+        now = time.time()
+        last_toggle = self._last_bt_a2dp_soft_toggle_ts_by_mac.get(mac_key, 0.0)
+        if (now - last_toggle) < self._bt_a2dp_soft_toggle_cooldown_sec:
+            logger.debug(
+                "Skipping A2DP soft-toggle for %s (cooldown active)",
+                device_address,
+            )
+            return False
+        self._last_bt_a2dp_soft_toggle_ts_by_mac[mac_key] = now
+
+        previous_profile = card_info.get('active_profile', '')
         logger.info(
             "No A2DP profiles available for %s; soft-toggling via profile off",
             device_address,
         )
-        if not self.set_bluetooth_profile(card_name, 'off'):
-            return False
-        time.sleep(0.5)
+        for attempt, wait_sec in enumerate((0.5, 1.0, 2.0), start=1):
+            if not self.set_bluetooth_profile(card_name, 'off'):
+                return False
+            time.sleep(wait_sec)
 
-        card_info = self.get_bluetooth_card_info(device_address)
-        if not card_info:
-            return False
-        profiles = card_info.get('profiles', {})
-        for profile in a2dp_priority:
-            if profile in profiles:
-                logger.info(
-                    "A2DP profile %s available after soft toggle for %s",
-                    profile, device_address,
-                )
-                return self.set_bluetooth_profile(card_info['name'], profile)
+            refreshed = self.get_bluetooth_card_info(device_address)
+            if not refreshed:
+                break
+            profiles = refreshed.get('profiles', {})
+            for profile in a2dp_priority:
+                if profile in profiles:
+                    logger.info(
+                        "A2DP profile %s available after soft toggle for %s",
+                        profile, device_address,
+                    )
+                    return self.set_bluetooth_profile(refreshed['name'], profile)
 
         logger.warning("A2DP still unavailable after soft toggle for %s", device_address)
+        # Do not leave the headset without audio: restore the last working profile.
+        if previous_profile and previous_profile != 'off':
+            logger.info("Restoring previous profile %s for %s", previous_profile, device_address)
+            self.set_bluetooth_profile(card_name, previous_profile)
         return False
+
+    def is_headset_profile(self, device_address: str) -> bool:
+        """Return True when the Bluetooth card is currently in a headset (HFP/HSP) profile.
+
+        HFP/HSP sinks are inherently mono (typically 16 kHz); SinkSwitch must not
+        try to create a mono remap sink on top of them — that is pointless and a
+        ``pactl load-module`` against a dying HFP transport can hang and wedge the
+        audio server.
+        """
+        try:
+            card_info = self.get_bluetooth_card_info(device_address)
+            if not card_info:
+                return False
+            active = (card_info.get('active_profile') or '').lower()
+            return active.startswith('headset')
+        except Exception as e:
+            logger.debug(f"Failed to inspect headset profile for {device_address}: {e}")
+            return False
 
     def _classify_device_type(self, device: Dict) -> str:
         """Return a friendly type: bluetooth, usb_headset, hdmi, analog_speakers, unknown."""
@@ -941,6 +1038,7 @@ class DeviceMonitor:
         """
         try:
             # Get all Bluetooth devices
+            seen_macs: Set[str] = set()
             for device in current_devices:
                 device_id = device.get('id', '')
                 if self._is_internal_managed_sink_id(device_id):
@@ -954,6 +1052,7 @@ class DeviceMonitor:
                     continue
                 
                 device_address_underscore = parts[1]  # 00_02_3C_AD_09_85
+                seen_macs.add(device_address_underscore.upper())
                 device_address_colon = device_address_underscore.replace('_', ':')
                 
                 # Get current profile
@@ -973,9 +1072,16 @@ class DeviceMonitor:
                 
                 last_profile = self.bluetooth_profile_state[device_address_underscore]['last_profile']
                 
-                # If profile changed from HSP/HFP to something else, no action needed
+                # If BlueZ has been left in 'off', treat it as a recoverable
+                # Bluetooth audio failure and try to re-enable A2DP immediately.
+                if active_profile == 'off':
+                    logger.warning(
+                        "Bluetooth profile is off for %s; attempting to restore A2DP",
+                        device_address_colon,
+                    )
+                    self.prefer_a2dp_profile(device_address_colon)
                 # If profile is currently HSP/HFP and has been for a while with no active streams, switch back to A2DP
-                if active_profile.startswith('headset'):
+                elif active_profile.startswith('headset'):
                     # Check if there are any active input sources (microphone in use)
                     has_active_mic = self._check_active_mic_streams()
                     
@@ -993,6 +1099,30 @@ class DeviceMonitor:
                         'last_profile': active_profile,
                         'profile_switch_time': time.time()
                     }
+
+            # If the BT sink disappears because BlueZ profile fell back to off,
+            # still inspect connected devices from BlueZ so we can recover them.
+            for device_address_underscore in self._get_connected_bluetooth_macs():
+                if device_address_underscore in seen_macs:
+                    continue
+                device_address_colon = device_address_underscore.replace('_', ':')
+                card_info = self.get_bluetooth_card_info(device_address_colon)
+                if not card_info:
+                    continue
+
+                active_profile = card_info.get('active_profile', '')
+                if device_address_underscore not in self.bluetooth_profile_state:
+                    self.bluetooth_profile_state[device_address_underscore] = {
+                        'last_profile': active_profile,
+                        'profile_switch_time': time.time()
+                    }
+
+                if active_profile == 'off':
+                    logger.warning(
+                        "Bluetooth profile is off for %s even though BlueZ reports it connected; attempting to restore A2DP",
+                        device_address_colon,
+                    )
+                    self.prefer_a2dp_profile(device_address_colon)
         
         except Exception as e:
             logger.debug(f"Error monitoring Bluetooth profiles: {e}")
@@ -1089,6 +1219,7 @@ class DeviceMonitor:
         for mac_us in self.bluetooth_profile_state.keys():
             if mac_us:
                 macs_us.add(mac_us.upper())
+        macs_us.update(self._get_connected_bluetooth_macs())
 
         if not macs_us:
             return

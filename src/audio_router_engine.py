@@ -346,14 +346,22 @@ class AudioRouterEngine:
             module_id = mod.get('id', '')
             if not module_id:
                 return False
-            unload_res = subprocess.run(
-                host_cmd(['pactl', 'unload-module', module_id]),
-                capture_output=True,
-                text=True,
-                **SUBPROCESS_TEXT_KW,
-                timeout=5,
-                check=False,
-            )
+            try:
+                unload_res = subprocess.run(
+                    host_cmd(['pactl', 'unload-module', module_id]),
+                    capture_output=True,
+                    text=True,
+                    **SUBPROCESS_TEXT_KW,
+                    timeout=5,
+                    check=False,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to unload stale mono remap sink %s: %s",
+                    mono_sink_name,
+                    e,
+                )
+                return False
             if unload_res.returncode == 0:
                 logger.info("Unloaded stale Bluetooth mono remap sink %s", mono_sink_name)
                 return True
@@ -414,24 +422,32 @@ class AudioRouterEngine:
         mono_sink_name = f"{self.MONO_REMAP_PREFIX}{sanitized}"[:120]
         sink_desc = f"SinkSwitch_Mono_for_{sanitized}"[:160]
 
-        result = subprocess.run(
-            host_cmd([
-                'pactl',
-                'load-module',
-                'module-remap-sink',
-                f'sink_name={mono_sink_name}',
-                f'master={actual_master_name}',
-                f'sink_properties=device.description={sink_desc}',
-                'channels=1',
-                'channel_map=mono',
-                'remix=yes',
-            ]),
-            capture_output=True,
-            text=True,
-            **SUBPROCESS_TEXT_KW,
-            timeout=5,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                host_cmd([
+                    'pactl',
+                    'load-module',
+                    'module-remap-sink',
+                    f'sink_name={mono_sink_name}',
+                    f'master={actual_master_name}',
+                    f'sink_properties=device.description={sink_desc}',
+                    'channels=1',
+                    'channel_map=mono',
+                    'remix=yes',
+                ]),
+                capture_output=True,
+                text=True,
+                **SUBPROCESS_TEXT_KW,
+                timeout=5,
+                check=False,
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to create mono remap sink for %s: %s",
+                master_sink,
+                e,
+            )
+            return master_sink
 
         if result.returncode != 0:
             err = (result.stderr or result.stdout or '').strip()
@@ -515,6 +531,14 @@ class AudioRouterEngine:
             return sink_name
 
         master_sink = self._normalize_master_sink_name(sink_name)
+
+        # HFP/HSP (headset) Bluetooth sinks are inherently mono (16 kHz) SCO
+        # transports. Wrapping them in a SinkSwitch mono remap is pointless and a
+        # pactl load-module against a profile that is mid-switch can hang and
+        # wedge the whole audio server, so never mono-remap a headset profile.
+        if self._is_headset_profile_bluetooth_sink(master_sink):
+            return sink_name
+
         if self.force_bluetooth_mono:
             mono_sink = self._ensure_mono_remap_sink(master_sink)
             self._required_mono_masters.add(master_sink)
@@ -529,16 +553,33 @@ class AudioRouterEngine:
         self._required_mono_masters.add(master_sink)
         return mono_sink
 
+    def _is_headset_profile_bluetooth_sink(self, sink_name: str) -> bool:
+        """Return True when a Bluetooth sink belongs to a card in the HFP/HSP headset profile."""
+        try:
+            if 'bluez' not in (sink_name or '').lower():
+                return False
+            parts = (sink_name or '').split('.')
+            if len(parts) < 3:
+                return False
+            device_address = parts[1].replace('_', ':')
+            return self.device_monitor.is_headset_profile(device_address)
+        except Exception as e:
+            logger.debug(f"Failed to check headset profile for {sink_name}: {e}")
+            return False
+
     def cleanup_managed_sinks(self) -> None:
         """Public cleanup helper used when stopping the in-app monitor."""
         self._required_mono_masters = set()
         self._cleanup_sinkswitch_remaps(startup=True)
     
-    def _ensure_a2dp_profile(self, sink_name: str) -> bool:
+    def _ensure_a2dp_profile(self, sink_name: str, allow_soft_toggle: bool = False) -> bool:
         """Ensure Bluetooth device is using A2DP (high-fidelity) profile
         
         Args:
             sink_name: Bluetooth sink name (e.g., 'bluez_output.00_02_3C_AD_09_85.1')
+            allow_soft_toggle: Permit the destructive off→a2dp transport toggle.
+                Routing hot paths leave this False so they never disrupt the audio
+                server; the low-frequency profile monitor handles recovery.
         
         Returns:
             True if A2DP profile is active or was successfully set
@@ -556,7 +597,9 @@ class AudioRouterEngine:
             device_address = parts[1].replace('_', ':')  # Convert to colon format
             
             # Attempt to set A2DP profile
-            return self.device_monitor.prefer_a2dp_profile(device_address)
+            return self.device_monitor.prefer_a2dp_profile(
+                device_address, allow_soft_toggle=allow_soft_toggle
+            )
         
         except Exception as e:
             logger.debug(f"Failed to ensure A2DP profile: {e}")
@@ -868,15 +911,26 @@ class AudioRouterEngine:
 
     def _move_sink_input(self, sink_input_id: str, target_sink_name: str, target_sink_id: str) -> bool:
         """Move one sink-input, trying sink name first then numeric id."""
+        move_res = None
         for target in (target_sink_name, target_sink_id):
-            move_res = subprocess.run(
-                host_cmd(['pactl', 'move-sink-input', sink_input_id, target]),
-                capture_output=True,
-                text=True,
-                **SUBPROCESS_TEXT_KW,
-                timeout=5,
-                check=False,
-            )
+            try:
+                move_res = subprocess.run(
+                    host_cmd(['pactl', 'move-sink-input', sink_input_id, target]),
+                    capture_output=True,
+                    text=True,
+                    **SUBPROCESS_TEXT_KW,
+                    timeout=5,
+                    check=False,
+                )
+            except Exception as e:
+                logger.warning(
+                    "move-sink-input failed for %s -> %s / #%s: %s",
+                    sink_input_id,
+                    target_sink_name,
+                    target_sink_id,
+                    e,
+                )
+                return False
             if move_res.returncode == 0:
                 return True
         err = (move_res.stderr or move_res.stdout or '').strip()
