@@ -22,6 +22,7 @@ finish-args:
   - --device=dri
   - --socket=pulseaudio
   - --talk-name=org.freedesktop.Flatpak
+  - --talk-name=org.freedesktop.PolicyKit1
   - --talk-name=org.freedesktop.portal.Desktop
 
 modules:

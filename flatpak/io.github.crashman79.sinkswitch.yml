@@ -22,6 +22,8 @@ finish-args:
   - --socket=pulseaudio
   # pw-cli still runs on the host
   - --talk-name=org.freedesktop.Flatpak
+  # BlueZ fast-connect/multiprofile settings: run pkexec on the host (PolicyKit auth)
+  - --talk-name=org.freedesktop.PolicyKit1
   # Login autostart: org.freedesktop.portal.Background (RequestBackground)
   - --talk-name=org.freedesktop.portal.Desktop
 

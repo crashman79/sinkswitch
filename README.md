@@ -19,6 +19,9 @@ Route application audio to different outputs (Bluetooth, USB, HDMI, etc.) by rul
 - **Router off until you start it** — Until you click **Start** in the toolbar, the router does nothing; all apps use the system default output.
 - **Default output** — Once the router is running, streams that do not match any rule go to the **Default output** you set in the toolbar. Matched streams go to the device specified by their rule.
 - **Single-earbud Bluetooth handling** — Optional in Settings. When enabled and a Bluetooth sink reports a single output channel (common when one earbud is in the case), SinkSwitch routes matching streams through a mono remap sink so left/right content is mixed. When both channels are available, routing stays stereo. If detection fails on your headset, use the **Force Mono** toolbar button to override detection.
+- **BlueZ A2DP first-connect fixes** — Optional in Settings. When a headset connects for the very first time (or right after a boot), BlueZ runs a short discovery pass to build its SDP/profile cache. If your sound server grabs the media transport before that cache is ready, BlueZ rejects high-quality A2DP and the headset falls back to HSP/HFP. Two documented fixes are available, applied through an admin (pkexec) dialog with a bluetooth service restart:
+  - **Skip reverse service discovery** — sets `ReverseServiceDiscovery = false` in `/etc/bluetooth/main.conf`, removing the discovery window the sound server races into. Side effect: AVRCP version info for the device may be incomplete.
+  - **WirePlumber D-Bus policy** — installs `/etc/dbus-1/system.d/bluetooth-wireplumber.conf` so WirePlumber (PipeWire) can send D-Bus replies back to bluetoothd; without it the A2DP sink can be missing until the bluetooth service is restarted (bluez issue #1924).
 
 ## Install and run
 
