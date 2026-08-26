@@ -18,6 +18,7 @@ from bluez_config import (
     DBUS_POLICY_CONTENT,
     DBUS_POLICY_PATH,
 )
+from host_command import host_cmd
 
 
 TYPICAL_CONF = """\
@@ -112,3 +113,40 @@ def test_dbus_policy_content_wellformed():
     assert "org.bluez.MediaEndpoint1" in DBUS_POLICY_CONTENT
     assert "<policy context=\"default\">" in DBUS_POLICY_CONTENT
     assert "send_type=\"method_return\"" in DBUS_POLICY_CONTENT
+
+
+def test_host_cmd_unchanged_outside_flatpak():
+    assert host_cmd(['bluetoothctl', 'disconnect', '00:02:3C:AD:09:85']) == [
+        'bluetoothctl', 'disconnect', '00:02:3C:AD:09:85'
+    ]
+    assert host_cmd(['pactl', 'list', 'sinks']) == ['pactl', 'list', 'sinks']
+
+
+def test_host_cmd_flatpak_routes_bluetoothctl_to_host(monkeypatch):
+    monkeypatch.setenv("FLATPAK_ID", "io.github.crashman79.sinkswitch")
+    monkeypatch.setenv("HOME", "/home/testuser")
+    monkeypatch.setenv("USER", "testuser")
+
+    argv = host_cmd(['bluetoothctl', 'disconnect', '00:02:3C:AD:09:85'])
+    assert argv[0] == "flatpak-spawn"
+    assert "--host" in argv
+    assert argv[-4:] == ['--', 'bluetoothctl', 'disconnect', '00:02:3C:AD:09:85']
+
+
+def test_host_cmd_flatpak_routes_mutating_pactl_to_host(monkeypatch):
+    monkeypatch.setenv("FLATPAK_ID", "io.github.crashman79.sinkswitch")
+    monkeypatch.setenv("HOME", "/home/testuser")
+    monkeypatch.setenv("USER", "testuser")
+
+    argv = host_cmd(['pactl', 'set-card-profile', 'bluez_card.00_02_3C_AD_09_85', 'a2dp-sink'])
+    assert argv[0] == "flatpak-spawn"
+    assert "--host" in argv
+
+
+def test_host_cmd_flatpak_keeps_readonly_pactl_in_sandbox(monkeypatch):
+    monkeypatch.setenv("FLATPAK_ID", "io.github.crashman79.sinkswitch")
+    monkeypatch.setenv("HOME", "/home/testuser")
+    monkeypatch.setenv("USER", "testuser")
+
+    assert host_cmd(['pactl', 'list', 'sinks']) == ['pactl', 'list', 'sinks']
+    assert host_cmd(['pactl', 'get-default-sink']) == ['pactl', 'get-default-sink']
