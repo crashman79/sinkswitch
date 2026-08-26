@@ -20,6 +20,12 @@ _PACTL_HOST_SUBCOMMANDS = frozenset(
     }
 )
 
+# Binaries that are not bundled in the Flatpak runtime and must always be run
+# on the host via ``flatpak-spawn``. bluetoothctl lives on the host (talking to
+# system bluetoothd); it is absent from the sandbox so any in-sandbox call
+# fails instantly with FileNotFoundError.
+_ALWAYS_HOST_BINARIES = frozenset({"pw-cli", "bluetoothctl"})
+
 
 def _flatpak_host_spawn_prefix() -> List[str]:
     """Env for host subprocesses that need the real PipeWire/Pulse session.
@@ -67,7 +73,7 @@ def host_cmd(argv: Sequence[str]) -> List[str]:
         return list(argv)
 
     exe = argv[0] if argv else ""
-    if exe == "pw-cli":
+    if exe in _ALWAYS_HOST_BINARIES:
         prefix = _flatpak_host_spawn_prefix()
         prefix.append("--")
         prefix.extend(argv)

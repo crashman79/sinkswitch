@@ -1,6 +1,6 @@
 # Checkpoint: HFP-stuck recovery + routing cycle fixes
 
-Date: 2026-08-26
+Date: 2026-08-26 (updated with the Flatpak `bluetoothctl` root-cause fix)
 Branch: `main` (uncommitted work from prior session + this checkpoint)
 
 ## Context
@@ -17,6 +17,30 @@ while the headset stayed HFP-stuck it would churn a reconnect roughly every
 couple of minutes, dropping audio each cycle.
 
 ## Changes in this checkpoint
+
+### 4. Root-cause fix: route `bluetoothctl` to the host in the Flatpak sandbox
+
+While verifying the cycle fixes on a live HFP-stuck headset, the recovery still
+failed to restore A2DP. The live (sandboxed) log showed `bt_hfp_recover_start`,
+`bt_repair_start`, and `bt_hfp_recover_fail` all at the **same millisecond** —
+the disconnect/reconnect was failing instantly, not slowly.
+
+Root cause: inside the Flatpak sandbox there is no `bluetoothctl` binary
+(`which bluetoothctl` → not found in `/app/bin:/usr/bin`). `host_cmd()` routed
+`pw-cli` and mutating `pactl` through `flatpak-spawn --host`, but **not**
+`bluetoothctl`. Every `subprocess.run(['bluetoothctl', ...])` in
+`DeviceMonitor` (`devices`, `info`, `disconnect`, `connect`) raised
+`FileNotFoundError` inside the sandbox, which `_repair_bluetooth_audio_for_mac`
+caught and turned into an instant `False`. The entire Bluetooth recovery path
+was silently dead under Flatpak.
+
+Fix in `src/host_command.py`: add `bluetoothctl` to an `_ALWAYS_HOST_BINARIES`
+set (with `pw-cli`) so it always runs via `flatpak-spawn --host`. Verified
+inside the sandbox that a host-spawned `bluetoothctl info` talks to system
+bluetoothd, and a full host-spawned disconnect/reconnect cycle restored A2DP:
+the card went from `headset-head-unit` only to `Active Profile: a2dp-sink-aac`
+with `a2dp-sink-{sbc,sbc_xq,aac,aptX}` available, sink back to stereo
+`2ch 48000Hz`.
 
 ### 1. Persistent diagnostics log restored (`src/routing_latency_log.py` was orphaned)
 
@@ -56,18 +80,27 @@ once per device regardless of which path triggers it.
 
 - `src/audio_router_engine.py`
 - `src/device_monitor.py`
+- `src/host_command.py` — route `bluetoothctl` (and `pw-cli`) to the host in Flatpak
 - `tests/test_idempotency.py` (existing HFP-stuck tests from prior session)
+- `tests/test_bluez_config.py` — new `host_cmd` Flatpak routing tests
 
 ## Verification
 
 - `python3 tests/test_idempotency.py` — all 12 tests PASS (including
   HFP-stuck detection and escalation/cooldown).
+- `python3 -m pytest tests/test_bluez_config.py` — 14 tests PASS (new
+  `host_cmd` routing tests for bluetoothctl/pactl in and out of Flatpak).
 - `python3 -m py_compile` on changed modules — OK.
+- Live verification inside the Flatpak sandbox: host-spawned `bluetoothctl`
+  reaches system bluetoothd; a manual host-spawned disconnect/reconnect
+  restored A2DP (`a2dp-sink-aac` active, stereo 48 kHz sink).
 
 ## Next steps / open items
 
 - Rebuild the Flatpak (`./build-and-run.sh`) so the running app picks up the
-  fixes; verify `~/.config/sinkswitch/routing_latency.log` shows recovery events
-  without churn.
-- Confirm on a live HFP-stuck headset that a single disconnect/reconnect recovers
-  A2DP and no further cycles occur within the cooldown window.
+  fixes; verify `~/.var/app/io.github.crashman79.sinkswitch/config/sinkswitch/
+  routing_latency.log` (the sandboxed path) shows a successful `bt_hfp_recover_done`
+  instead of an instant `bt_hfp_recover_fail`.
+- Confirm on a live HFP-stuck headset that the app itself (not a manual cycle)
+  restores A2DP with a single disconnect/reconnect and no further cycles within
+  the cooldown window.
