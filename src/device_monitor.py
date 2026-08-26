@@ -13,6 +13,8 @@ from dataclasses import dataclass
 import time
 import threading
 
+from routing_latency_log import log_latency_event
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,6 +50,8 @@ class DeviceMonitor:
         self._bt_auto_repair_cooldown_sec = 90.0
         self._last_bt_a2dp_soft_toggle_ts_by_mac: Dict[str, float] = {}
         self._bt_a2dp_soft_toggle_cooldown_sec = 45.0
+        self._last_bt_hfp_repair_ts_by_mac: Dict[str, float] = {}
+        self._bt_hfp_repair_cooldown_sec = 120.0
 
     def _maybe_monitor_bluetooth_profiles(self, current_devices: List[Dict], force: bool = False) -> None:
         """Run Bluetooth profile maintenance on a low-frequency cadence.
@@ -373,6 +377,25 @@ class DeviceMonitor:
             logger.debug(f"Failed to inspect headset profile for {device_address}: {e}")
             return False
 
+    def _is_hfp_stuck_card(self, card_info: Dict) -> bool:
+        """Return True when a Bluetooth card is stuck in a headset profile with no A2DP available.
+
+        A card that is active on HSP/HFP and exposes *no* a2dp-* profile is the
+        classic fresh-connect BlueZ race result: the device auto-connected on the
+        low-quality SCO/HFP profile and the high-fidelity A2DP profile never
+        appeared on the card. The non-destructive ``prefer_a2dp_profile`` soft
+        toggle cannot fix this because there is no A2DP profile to switch to; the
+        only reliable recovery is to cycle the connection (disconnect/reconnect)
+        so BlueZ re-runs SDP/profile discovery.
+        """
+        if not card_info:
+            return False
+        active = (card_info.get('active_profile') or '').lower()
+        if not active.startswith('headset'):
+            return False
+        profiles = card_info.get('profiles') or {}
+        return not any(str(p).startswith('a2dp') for p in profiles)
+
     def _classify_device_type(self, device: Dict) -> str:
         """Return a friendly type: bluetooth, usb_headset, hdmi, analog_speakers, unknown."""
         text = f"{device.get('id', '')} {device.get('name', '')} {device.get('description', '')}".lower()
@@ -594,6 +617,11 @@ class DeviceMonitor:
         """One iteration: fetch state, optional config regen, relevance check, callback if needed."""
         current_devices = self.get_devices()
         current_streams = self._get_audio_streams()
+
+        if force_apply:
+            log_latency_event(
+                f"watch_trigger reason=event streams={len(current_streams)} devices={len(current_devices)}"
+            )
 
         if config_regen_callback and self._is_significant_device_change(current_devices):
             time_since_last = time.time() - self.last_config_regeneration
@@ -1084,13 +1112,22 @@ class DeviceMonitor:
                 elif active_profile.startswith('headset'):
                     # Check if there are any active input sources (microphone in use)
                     has_active_mic = self._check_active_mic_streams()
-                    
+
                     # If no mic is in use and we've been in headset mode for > 5 seconds, switch back to A2DP
                     time_in_headset = time.time() - self.bluetooth_profile_state[device_address_underscore].get('profile_switch_time', 0)
                     if not has_active_mic and time_in_headset > 5:
-                        logger.info(f"Restoring A2DP profile for {device_address_colon} (no active mic streams)")
-                        self.prefer_a2dp_profile(device_address_colon)
-                        self.bluetooth_profile_state[device_address_underscore]['profile_switch_time'] = time.time()
+                        if self._is_hfp_stuck_card(card_info):
+                            recovered = self._recover_hfp_stuck_device(device_address_colon, card_info)
+                            # Only reset the timing window when recovery actually
+                            # succeeded. On failure/cooldown keep the original
+                            # profile_switch_time so the headset window stays
+                            # open and the device is re-evaluated honestly.
+                            if recovered:
+                                self.bluetooth_profile_state[device_address_underscore]['profile_switch_time'] = time.time()
+                        else:
+                            logger.info(f"Restoring A2DP profile for {device_address_colon} (no active mic streams)")
+                            self.prefer_a2dp_profile(device_address_colon)
+                            self.bluetooth_profile_state[device_address_underscore]['profile_switch_time'] = time.time()
                 
                 # Update state
                 if active_profile != last_profile:
@@ -1167,9 +1204,65 @@ class DeviceMonitor:
             logger.debug(f"bluetoothctl info failed for {mac_colon}: {e}")
             return False
 
-    def _repair_bluetooth_audio_for_mac(self, mac_colon: str, wait_sec: float = 7.0) -> bool:
-        """Disconnect/reconnect one Bluetooth device and wait for any bluez_output sink."""
+    def _recover_hfp_stuck_device(
+        self,
+        mac_colon: str,
+        card_info: Dict,
+    ) -> bool:
+        """Recover a Bluetooth device stuck on HFP-only (no A2DP profile on the card).
+
+        The non-destructive off→a2dp toggle cannot help here because there is no
+        A2DP profile to select; the card simply never exposed one. We escalate to a
+        full disconnect/reconnect so BlueZ re-runs SDP discovery, which is the
+        reliable way to clear the fresh-connect race. Escalation is cooldown-limited
+        so a device that repeatedly fails does not get churned every monitor tick.
+
+        Returns True if an A2DP profile became available.
+        """
+        now = time.time()
+        mac_key = mac_colon.upper()
+        last = self._last_bt_hfp_repair_ts_by_mac.get(mac_key, 0.0)
+        if (now - last) < self._bt_hfp_repair_cooldown_sec:
+            logger.debug(
+                "Skipping HFP-stuck reconnect for %s (cooldown active)",
+                mac_colon,
+            )
+            return False
+        self._last_bt_hfp_repair_ts_by_mac[mac_key] = now
+        # Cross-couple with the auto-repair cooldown so the two recovery paths
+        # cannot fire disconnect/reconnect back-to-back for the same device.
+        self._last_bt_auto_repair_ts_by_mac[mac_key] = now
+
+        logger.warning(
+            "Bluetooth device %s is HFP-only (no A2DP profile); cycling connection to re-discover A2DP",
+            mac_colon,
+        )
+        log_latency_event(f"bt_hfp_recover_start mac={mac_colon}")
+        if not self._repair_bluetooth_audio_for_mac(mac_colon, wait_sec=7.0, require_a2dp=True):
+            log_latency_event(f"bt_hfp_recover_fail mac={mac_colon}")
+            logger.warning("HFP-stuck reconnect did not restore A2DP for %s", mac_colon)
+            return False
+
+        log_latency_event(f"bt_hfp_recover_done mac={mac_colon}")
+        self._last_bt_a2dp_soft_toggle_ts_by_mac.pop(mac_colon.upper(), None)
+        return True
+
+    def _repair_bluetooth_audio_for_mac(self, mac_colon: str, wait_sec: float = 7.0, require_a2dp: bool = False) -> bool:
+        """Disconnect/reconnect one Bluetooth device and wait for recovery.
+
+        A full disconnect/reconnect is the most reliable way to clear a fresh-connect
+        HFP-only state: it forces BlueZ to re-run SDP/profile discovery so the A2DP
+        profile can appear on the card.
+
+        Args:
+            mac_colon: Bluetooth MAC with colons.
+            wait_sec: How long to poll for recovery after reconnecting.
+            require_a2dp: When True, also wait for the card to expose an A2DP
+                profile (not just any bluez sink), which is what an HFP-stuck
+                recovery needs.
+        """
         try:
+            log_latency_event(f"bt_repair_start mac={mac_colon} require_a2dp={int(bool(require_a2dp))}")
             disc = subprocess.run(
                 host_cmd(['bluetoothctl', 'disconnect', mac_colon]),
                 capture_output=True,
@@ -1195,11 +1288,21 @@ class DeviceMonitor:
             deadline = time.time() + wait_sec
             while time.time() < deadline:
                 if self._bluez_has_any_sink_for_mac(self.get_devices(), mac_us):
-                    logger.info("Bluetooth auto-repair recovered sink for %s", mac_colon)
-                    return True
+                    if not require_a2dp:
+                        logger.info("Bluetooth auto-repair recovered sink for %s", mac_colon)
+                        return True
+                    card_info = self.get_bluetooth_card_info(mac_colon)
+                    profiles = (card_info or {}).get('profiles') or {}
+                    if any(str(p).startswith('a2dp') for p in profiles):
+                        logger.info("Bluetooth auto-repair recovered A2DP for %s", mac_colon)
+                        return True
                 time.sleep(0.35)
 
-            logger.warning("Bluetooth auto-repair did not recover sink in time for %s", mac_colon)
+            logger.warning(
+                "Bluetooth auto-repair did not recover %s in time for %s",
+                "A2DP" if require_a2dp else "sink",
+                mac_colon,
+            )
             return False
         except Exception as e:
             logger.warning("Bluetooth auto-repair failed for %s: %s", mac_colon, e)
@@ -1241,6 +1344,10 @@ class DeviceMonitor:
                 mac_colon,
             )
             self._last_bt_auto_repair_ts_by_mac[mac_colon] = now
+            # Cross-couple with the HFP-stuck recovery cooldown so the two
+            # recovery paths cannot fire disconnect/reconnect back-to-back.
+            self._last_bt_hfp_repair_ts_by_mac[mac_colon] = now
+            log_latency_event(f"bt_auto_repair_start mac={mac_colon}")
             self._repair_bluetooth_audio_for_mac(mac_colon)
     
     def _check_active_mic_streams(self) -> bool:

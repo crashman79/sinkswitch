@@ -10,6 +10,7 @@ import time
 from typing import Dict, List, Optional, Set, Tuple
 from device_monitor import DeviceMonitor
 from host_command import host_cmd, SUBPROCESS_TEXT_KW
+from routing_latency_log import log_latency_event
 
 logger = logging.getLogger(__name__)
 
@@ -630,9 +631,11 @@ class AudioRouterEngine:
         Returns:
             List of result dictionaries with success status and messages
         """
+        log_latency_event(f"apply_start rules={len(rules) if rules else 'fallback'}")
         if not rules:
             rules = self._generate_fallback_rules()
 
+        _start = time.time()
         results = []
         self._required_mono_masters = set()
         
@@ -643,7 +646,12 @@ class AudioRouterEngine:
         # Also enforce fallback behavior for streams that do not match any rule.
         results.append(self._route_unmatched_streams_to_default(rules))
         self._cleanup_sinkswitch_remaps(startup=False)
-        
+
+        _moved = sum(int(r.get('routed_count', 0)) for r in results)
+        log_latency_event(
+            f"apply_done rules={len(rules)} moved={_moved} elapsed_ms={int((time.time() - _start) * 1000)}"
+        )
+
         return results
     
     def _apply_rule(self, rule: Dict) -> Dict:
