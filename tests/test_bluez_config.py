@@ -17,6 +17,8 @@ from bluez_config import (
     merge_main_conf,
     DBUS_POLICY_CONTENT,
     DBUS_POLICY_PATH,
+    WIREPLUMBER_BT_CONF_CONTENT,
+    WIREPLUMBER_BT_CONF,
 )
 from host_command import host_cmd
 
@@ -113,6 +115,16 @@ def test_dbus_policy_content_wellformed():
     assert "org.bluez.MediaEndpoint1" in DBUS_POLICY_CONTENT
     assert "<policy context=\"default\">" in DBUS_POLICY_CONTENT
     assert "send_type=\"method_return\"" in DBUS_POLICY_CONTENT
+
+
+def test_wireplumber_conf_content_wellformed():
+    # Lives under the WirePlumber 0.5+ bluetooth monitor drop-in dir.
+    assert WIREPLUMBER_BT_CONF.endswith("sinkswitch-a2dp.conf")
+    assert "bluetooth.conf.d" in WIREPLUMBER_BT_CONF
+    # The actual race prevention: only auto-connect A2DP, defer HFP.
+    assert "bluez5.auto-connect = [ a2dp_sink ]" in WIREPLUMBER_BT_CONF_CONTENT
+    assert "device.name = \"~bluez_card.*\"" in WIREPLUMBER_BT_CONF_CONTENT
+    assert "bluez5.roles = [ a2dp_sink ]" in WIREPLUMBER_BT_CONF_CONTENT
 
 
 def test_host_cmd_unchanged_outside_flatpak():
