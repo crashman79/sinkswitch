@@ -665,6 +665,29 @@ class DeviceMonitor:
         # Keep BT profile maintenance out of the hot path for stream routing.
         self._maybe_monitor_bluetooth_profiles(current_devices)
 
+    def _safe_run_watch_iteration(
+        self,
+        callback: Callable,
+        config_regen_callback: Optional[Callable],
+        rules_ref: Optional[List[Dict]],
+        force_apply: bool = False,
+    ) -> None:
+        """Run one watch iteration, isolating transient failures.
+
+        A single bad tick (e.g. malformed device/stream data or a backend error
+        while the Bluetooth profile is mid-race) must not propagate out of the
+        event-based monitor loop and kill the monitor thread. Log and continue.
+        """
+        try:
+            self._run_watch_iteration(
+                callback,
+                config_regen_callback,
+                rules_ref,
+                force_apply=force_apply,
+            )
+        except Exception as e:
+            logger.error(f"Error during device monitoring iteration: {e}")
+
     def watch_devices(self, callback: Callable, interval: int = 2, config_regen_callback: Optional[Callable] = None, stop_event: Optional[threading.Event] = None, rules_ref: Optional[List[Dict]] = None):
         """Watch for device changes and call callback when changes detected.
 
@@ -760,7 +783,7 @@ class DeviceMonitor:
                         time.sleep(debounce_sec)
                     if stop_event and stop_event.is_set():
                         break
-                    self._run_watch_iteration(
+                    self._safe_run_watch_iteration(
                         callback,
                         config_regen_callback,
                         rules_ref,
@@ -777,7 +800,7 @@ class DeviceMonitor:
                     pending_sink_input_followup_at = None
                     if stop_event and stop_event.is_set():
                         break
-                    self._run_watch_iteration(
+                    self._safe_run_watch_iteration(
                         callback,
                         config_regen_callback,
                         rules_ref,
@@ -785,9 +808,11 @@ class DeviceMonitor:
                     )
                 if now - last_bt >= bt_interval_sec:
                     last_bt = now
-                    self._run_watch_iteration(callback, config_regen_callback, rules_ref)
+                    self._safe_run_watch_iteration(callback, config_regen_callback, rules_ref)
         except KeyboardInterrupt:
             logger.info("Device monitoring stopped")
+        except Exception as e:
+            logger.error(f"Error during device monitoring: {e}")
         finally:
             try:
                 proc.terminate()
@@ -1211,11 +1236,14 @@ class DeviceMonitor:
     ) -> bool:
         """Recover a Bluetooth device stuck on HFP-only (no A2DP profile on the card).
 
-        The non-destructive off→a2dp toggle cannot help here because there is no
-        A2DP profile to select; the card simply never exposed one. We escalate to a
-        full disconnect/reconnect so BlueZ re-runs SDP discovery, which is the
-        reliable way to clear the fresh-connect race. Escalation is cooldown-limited
-        so a device that repeatedly fails does not get churned every monitor tick.
+        Tries the least-disruptive fix first: a soft ``off``→A2DP profile toggle
+        (via ``prefer_a2dp_profile``), which can expose the A2DP profile or simply
+        be a stale snapshot without dropping the live connection. ``prefer_a2dp_profile``
+        restores the previous profile if it cannot recover, so the headset is never
+        left silent. Only if the soft switch fails do we escalate to a full
+        disconnect/reconnect so BlueZ re-runs SDP discovery — the reliable way to
+        clear the fresh-connect race. Escalation is cooldown-limited so a device
+        that repeatedly fails does not get churned every monitor tick.
 
         Returns True if an A2DP profile became available.
         """
@@ -1234,10 +1262,20 @@ class DeviceMonitor:
         self._last_bt_auto_repair_ts_by_mac[mac_key] = now
 
         logger.warning(
-            "Bluetooth device %s is HFP-only (no A2DP profile); cycling connection to re-discover A2DP",
+            "Bluetooth device %s is HFP-only (no A2DP profile); trying soft A2DP switch before reconnect",
             mac_colon,
         )
         log_latency_event(f"bt_hfp_recover_start mac={mac_colon}")
+        # Least-disruptive first: a soft off→a2dp toggle can expose the A2DP
+        # profile (or simply be the wrong transient snapshot) without dropping
+        # the live connection. prefer_a2dp_profile restores the previous
+        # profile if it cannot recover, so the headset is never left silent.
+        # Only escalate to a full disconnect/reconnect if the soft switch fails.
+        if self.prefer_a2dp_profile(mac_colon, allow_soft_toggle=True):
+            logger.info("Recovered A2DP via soft switch for %s (no reconnect needed)", mac_colon)
+            log_latency_event(f"bt_hfp_recover_soft mac={mac_colon}")
+            self._last_bt_a2dp_soft_toggle_ts_by_mac.pop(mac_colon.upper(), None)
+            return True
         if not self._repair_bluetooth_audio_for_mac(mac_colon, wait_sec=7.0, require_a2dp=True):
             log_latency_event(f"bt_hfp_recover_fail mac={mac_colon}")
             logger.warning("HFP-stuck reconnect did not restore A2DP for %s", mac_colon)

@@ -1,35 +1,47 @@
 #!/usr/bin/env python3
 """
-BlueZ daemon configuration helpers for the first-connect A2DP race.
+BlueZ / WirePlumber configuration to prevent the first-connect A2DP race.
 
-When a headset connects for the first time (or the first time after a
-boot/reboot), BlueZ runs a short internal timer to discover SDP records and
-build its profile cache.  If the sound server grabs the media transport before
-that cache is ready, BlueZ rejects high-quality A2DP setup and the headset
-falls back to low-quality HSP/HFP.
+Symptom (bluez/bluez#1545, #1570, #1646): a headset connects, immediately
+disconnects or falls back to HFP-only, and a ``systemctl restart bluetooth``
+makes it work. Two distinct upstream root causes share this symptom:
 
-The knobs that actually mitigate this (they are documented fixes in the BlueZ
-issue tracker, unlike FastConnectable/MultiProfile which do not address the
-discovery race):
+  1. A BlueZ 5.83+ regression (commit 00969bd) where a *failed* authentication
+     request disconnects the device. Often triggered by a second auth request
+     (e.g. KDE Connect). Fixed by updating BlueZ (the fix is in 5.87). Nothing
+     here can fix that short of a version bump.
+
+  2. A D-Bus policy bug (bluez/bluez#1924). ``/usr/share/dbus-1/system.d/
+     bluetooth.conf`` only grants ``send_interface`` permissions under
+     ``<policy user="root">``, so WirePlumber (running as the user) can call
+     bluetoothd but **cannot send ``method_return``/``error`` back**. A2DP
+     negotiation then fails with ``Rejected send message, 0 matched rules;
+     type="method_return"/"error"``. This is fixed by a config override.
+
+The PRIMARY prevention (and the only one that addresses cause #2) is the
+D-Bus policy override at /etc/dbus-1/system.d/bluetooth-wireplumber.conf. It is
+the upstream-proposed fix for #1924.
+
+Secondary mitigation: stop HFP/HSP and A2DP from being established together.
+WirePlumber is told to auto-connect only the high-fidelity A2DP sink; HFP/HSP
+connects on demand when a microphone stream appears. This reduces profile
+contention but does NOT by itself fix the D-Bus race above.
+
+Supporting knob (low value, kept for completeness):
 
   * ReverseServiceDiscovery = false  under [General] in /etc/bluetooth/main.conf
-        Skips the reverse-SDP query BlueZ performs for previously-unknown
-        devices, removing the discovery window the sound server races into.
-        Side effect: AVRCP version info for the peer may be incomplete.
+        Skips BlueZ advertising our SDP records to the remote. Effect on the
+        race is unproven; retained only as a minor discovery-window shrink.
+        (FastConnectable/MultiProfile do NOT address this race and are
+        intentionally not set.)
 
-  * /etc/dbus-1/system.d/bluetooth-wireplumber.conf
-        D-Bus policy override that lets WirePlumber (PipeWire) send
-        method_return/error messages back to bluetoothd.  Without it the
-        profile setup can fail at the D-Bus layer and the A2DP sink is missing
-        until the bluetooth service is restarted.  See bluez issue #1924.
-
-Editing system files and restarting the bluetooth service needs root, so this
-module implements the pure merge logic (unit-testable) plus a standalone
-``main()`` intended to run under ``pkexec`` (PolicyKit).
+Editing system files and restarting services needs root, so this module
+implements the pure merge logic (unit-testable) plus a standalone ``main()``
+intended to run under ``pkexec`` (PolicyKit).
 
 Running as a script (root):
-    pkexec python3 bluez_config.py --reverse-service-discovery enable --dbus-policy install
-    pkexec python3 bluez_config.py --reverse-service-discovery disable --dbus-policy remove
+    pkexec python3 bluez_config.py --wireplumber-a2dp enable
+    pkexec python3 bluez_config.py --wireplumber-a2dp disable --reverse-service-discovery disable
 """
 
 import argparse
@@ -70,6 +82,42 @@ DBUS_POLICY_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
     <allow send_type="method_return"/>
   </policy>
 </busconfig>
+"""
+
+# WirePlumber (PipeWire) bluetooth monitor config.  Restricting auto-connect to
+# a2dp_sink is a SECONDARY mitigation for bluez/bluez#1545: it stops HFP/HSP and
+# A2DP from being brought up simultaneously, reducing profile contention. It does
+# not by itself fix the D-Bus policy race (bluez/bluez#1924); the D-Bus override
+# below is the primary prevention.
+WIREPLUMBER_BT_DIR = "/etc/wireplumber/bluetooth.conf.d"
+WIREPLUMBER_BT_CONF = "/etc/wireplumber/bluetooth.conf.d/sinkswitch-a2dp.conf"
+
+# SPA-JSON config for WirePlumber 0.5+.  Only auto-connect the high-fidelity
+# A2DP sink; HFP/HSP connects on demand when a microphone stream appears, so the
+# two profiles are never established together at connect time.
+WIREPLUMBER_BT_CONF_CONTENT = """\
+# SinkSwitch: prevent the BlueZ<->WirePlumber first-connect race (bluez/bluez#1545)
+# where A2DP is dropped because HFP and A2DP are established together.  Only
+# auto-connect the high-fidelity A2DP sink; HFP/HSP connects on demand when a
+# microphone stream appears.
+monitor.bluez.rules = [
+  {
+    matches = [
+      {
+        device.name = "~bluez_card.*"
+      }
+    ]
+    actions = {
+      update-props = {
+        bluez5.auto-connect = [ a2dp_sink ]
+      }
+    }
+  }
+]
+
+monitor.bluez.properties = {
+  bluez5.roles = [ a2dp_sink ]
+}
 """
 
 
@@ -151,6 +199,16 @@ def _dbus_reload_command() -> List[str]:
     return ["systemctl", "reload", "dbus"]
 
 
+def _wireplumber_reload_command() -> List[str]:
+    """Best-effort restart of WirePlumber so the new bluetooth rule takes effect.
+
+    WirePlumber runs per-user under systemd --user on desktops, so the system
+    service restart may not be the running instance; the rule also applies on
+    the next device (re)connect without a restart, so failures are ignored.
+    """
+    return ["systemctl", "restart", "wireplumber"]
+
+
 def _read_or_empty(path: str) -> str:
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -170,11 +228,26 @@ def _remove_dbus_policy(path: str) -> bool:
         return False
 
 
+def _install_wireplumber_conf(path: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    Path(path).write_text(WIREPLUMBER_BT_CONF_CONTENT, encoding="utf-8")
+
+
+def _remove_wireplumber_conf(path: str) -> bool:
+    try:
+        Path(path).unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 def apply_bluetooth_settings(
     reverse_service_discovery: Optional[bool] = None,
     dbus_policy: Optional[bool] = None,
+    wireplumber_a2dp: Optional[bool] = None,
     main_conf: str = MAIN_CONF,
     dbus_policy_path: str = DBUS_POLICY_PATH,
+    wireplumber_conf_path: str = WIREPLUMBER_BT_CONF,
 ) -> Tuple[bool, str]:
     """Persist the first-connect A2DP fixes and restart BlueZ. Must run as root.
 
@@ -184,10 +257,18 @@ def apply_bluetooth_settings(
             None -> leave untouched.
         dbus_policy: True -> install the WirePlumber D-Bus policy override;
             False -> remove it; None -> leave untouched.
+        wireplumber_a2dp: True -> install the WirePlumber bluetooth rule that
+            auto-connects only a2dp_sink (secondary race mitigation: reduces
+            HFP/A2DP contention); False -> remove it; None -> leave untouched.
 
     Returns:
-        (ok, message). A backup of main.conf is written before any change, and
-        the bluetooth service is restarted after a successful write.
+        (ok, message). A backup of main.conf is written before any change. The
+        bluetooth service is restarted **only** when main.conf
+        (ReverseServiceDiscovery) changes, since that is the only setting that
+        requires bluetoothd to re-read it. The D-Bus policy takes effect via a
+        dbus reload, and the WirePlumber conf via a wireplumber reload; neither
+        needs a bluetooth restart, so applying them no longer drops a live
+        audio connection.
     """
     try:
         changes = []
@@ -203,7 +284,8 @@ def apply_bluetooth_settings(
 
         content = _read_or_empty(main_conf)
         new_content = merge_main_conf(content, set_keys=set_keys, remove_keys=remove_keys)
-        if new_content != content:
+        main_conf_changed = new_content != content
+        if main_conf_changed:
             shutil.copyfile(main_conf, main_conf + MAIN_CONF_BACKUP_SUFFIX)
             with open(main_conf, "w", encoding="utf-8") as f:
                 f.write(new_content)
@@ -218,6 +300,16 @@ def apply_bluetooth_settings(
                 changes.append("D-Bus policy removed")
             policy_changed = True
 
+        wp_changed = False
+        if wireplumber_a2dp is not None:
+            if wireplumber_a2dp:
+                _install_wireplumber_conf(wireplumber_conf_path)
+                changes.append("WirePlumber a2dp-only auto-connect installed")
+            else:
+                _remove_wireplumber_conf(wireplumber_conf_path)
+                changes.append("WirePlumber a2dp-only auto-connect removed")
+            wp_changed = True
+
         if policy_changed:
             try:
                 subprocess.run(
@@ -229,23 +321,70 @@ def apply_bluetooth_settings(
             except Exception:
                 pass
 
-        res = subprocess.run(
-            _bluetooth_service_restart_command(),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if res.returncode != 0:
-            err = (res.stderr or res.stdout or "").strip()
-            return False, (
-                f"Config updated ({', '.join(changes)}), but restarting bluetooth failed: "
-                f"{err or res.returncode}"
+        if wp_changed:
+            try:
+                subprocess.run(
+                    _wireplumber_reload_command(),
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except Exception:
+                pass
+
+        # Only restart bluetooth when main.conf actually changed. The D-Bus
+        # policy and WirePlumber conf are applied via their own reloads above,
+        # and a bluetooth restart would needlessly drop a live connection.
+        if main_conf_changed:
+            res = subprocess.run(
+                _bluetooth_service_restart_command(),
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
+            if res.returncode != 0:
+                err = (res.stderr or res.stdout or "").strip()
+                return False, (
+                    f"Config updated ({', '.join(changes)}), but restarting bluetooth failed: "
+                    f"{err or res.returncode}"
+                )
+            if changes:
+                return True, f"Bluetooth restarted with: {', '.join(changes)}"
+            return True, "Bluetooth service restarted."
+
         if changes:
-            return True, f"Bluetooth restarted with: {', '.join(changes)}"
-        return True, "Bluetooth service restarted."
+            return True, f"Applied (no bluetooth restart needed): {', '.join(changes)}"
+        return True, "No BlueZ settings changed."
     except Exception as e:
         return False, str(e)
+
+
+def check_applied_state(
+    main_conf: str = MAIN_CONF,
+    dbus_policy_path: str = DBUS_POLICY_PATH,
+    wireplumber_conf_path: str = WIREPLUMBER_BT_CONF,
+) -> Dict[str, bool]:
+    """Report whether each preventative is present on disk (no root required).
+
+    Used by the GUI to decide whether a startup auto-apply is needed, so the
+    pkexec authorization dialog only appears when something is actually missing.
+    """
+    rsd = False
+    try:
+        for line in _read_or_empty(main_conf).splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, _, value = stripped.partition("=")
+            if key.strip().lower() == "reverseservicediscovery":
+                rsd = value.strip().lower() == "false"
+    except Exception:
+        rsd = False
+    return {
+        "reverse_service_discovery": rsd,
+        "dbus_policy": os.path.exists(dbus_policy_path),
+        "wireplumber_a2dp": os.path.exists(wireplumber_conf_path),
+    }
 
 
 def _host_python() -> str:
@@ -282,15 +421,18 @@ def _stage_host_script() -> Path:
 
     content = _script_path().read_text(encoding="utf-8")
     if os.environ.get("FLATPAK_ID"):
+        # --directory must point at a path that exists on the HOST. The sandbox
+        # cwd (e.g. /app/lib/sinkswitch) does not exist on the host, and
+        # flatpak-spawn --host would otherwise fail to chdir there.
         subprocess.run(
-            ["flatpak-spawn", "--host", "mkdir", "-p", str(host_dir)],
+            ["flatpak-spawn", "--host", "--directory=/tmp", "mkdir", "-p", str(host_dir)],
             capture_output=True,
             text=True,
             timeout=30,
             check=False,
         )
         proc = subprocess.run(
-            ["flatpak-spawn", "--host", "sh", "-c", 'cat > "$1"', "_", str(target)],
+            ["flatpak-spawn", "--host", "--directory=/tmp", "sh", "-c", 'cat > "$1"', "_", str(target)],
             input=content,
             capture_output=True,
             text=True,
@@ -312,16 +454,31 @@ def _stage_host_script() -> Path:
 def _pkexec_command(
     reverse_service_discovery: Optional[bool] = None,
     dbus_policy: Optional[bool] = None,
+    wireplumber_a2dp: Optional[bool] = None,
 ) -> List[str]:
     script = _stage_host_script() if os.environ.get("FLATPAK_ID") else _script_path()
 
     cmd: List[str] = []
     if os.environ.get("FLATPAK_ID"):
+        # Forward the session display/agent env so the PolicyKit dialog can
+        # actually appear (otherwise pkexec cannot locate the auth agent on a
+        # Wayland/X11 session and the apply fails silently). DBUS_SESSION_BUS
+        # and XDG_RUNTIME_DIR are forwarded by flatpak-spawn --host already, but
+        # we set them explicitly for robustness.
+        display_env = [
+            f"--env=DBUS_SESSION_BUS_ADDRESS={os.environ.get('DBUS_SESSION_BUS_ADDRESS', '')}",
+            f"--env=XDG_RUNTIME_DIR={os.environ.get('XDG_RUNTIME_DIR', '')}",
+        ]
+        if os.environ.get("WAYLAND_DISPLAY"):
+            display_env.append(f"--env=WAYLAND_DISPLAY={os.environ['WAYLAND_DISPLAY']}")
+        if os.environ.get("DISPLAY"):
+            display_env.append(f"--env=DISPLAY={os.environ['DISPLAY']}")
         cmd = [
             "flatpak-spawn",
             "--host",
             "--directory=/tmp",
             "--env=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            *display_env,
             "pkexec",
         ]
     else:
@@ -332,18 +489,28 @@ def _pkexec_command(
         cmd += ["--reverse-service-discovery", "enable" if reverse_service_discovery else "disable"]
     if dbus_policy is not None:
         cmd += ["--dbus-policy", "install" if dbus_policy else "remove"]
+    if wireplumber_a2dp is not None:
+        cmd += ["--wireplumber-a2dp", "enable" if wireplumber_a2dp else "disable"]
     return cmd
 
 
 def run_bluetooth_settings_apply(
     reverse_service_discovery: Optional[bool] = None,
     dbus_policy: Optional[bool] = None,
+    wireplumber_a2dp: Optional[bool] = None,
 ) -> Tuple[bool, str]:
     """Apply the first-connect A2DP fixes via pkexec (PolicyKit auth dialog)."""
-    if reverse_service_discovery is None and dbus_policy is None:
+    if (
+        reverse_service_discovery is None
+        and dbus_policy is None
+        and wireplumber_a2dp is None
+    ):
         return True, "No BlueZ settings changed."
 
-    cmd = _pkexec_command(reverse_service_discovery, dbus_policy)
+    try:
+        cmd = _pkexec_command(reverse_service_discovery, dbus_policy, wireplumber_a2dp)
+    except Exception as e:
+        return False, f"Failed to stage BlueZ settings helper: {e}"
     try:
         res = subprocess.run(
             cmd,
@@ -377,6 +544,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         choices=["install", "remove", "keep"],
         default="keep",
     )
+    parser.add_argument(
+        "--wireplumber-a2dp",
+        choices=["enable", "disable", "keep"],
+        default="keep",
+    )
     args = parser.parse_args(argv)
 
     reverse_service_discovery = (
@@ -387,8 +559,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     dbus_policy = (
         None if args.dbus_policy == "keep" else args.dbus_policy == "install"
     )
+    wireplumber_a2dp = (
+        None if args.wireplumber_a2dp == "keep" else args.wireplumber_a2dp == "enable"
+    )
 
-    ok, msg = apply_bluetooth_settings(reverse_service_discovery, dbus_policy)
+    ok, msg = apply_bluetooth_settings(
+        reverse_service_discovery, dbus_policy, wireplumber_a2dp
+    )
     print(msg)
     return 0 if ok else 1
 
