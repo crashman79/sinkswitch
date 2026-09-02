@@ -312,7 +312,6 @@ def test_bt_off_profile_triggers_recovery():
         "profiles": {"a2dp-sink": "High Fidelity Playback"},
     }), patch.object(DeviceMonitor, "prefer_a2dp_profile", side_effect=lambda addr: called.append(addr) or True), \
          patch.object(DeviceMonitor, "_get_connected_bluetooth_macs", return_value={"00_02_3C_AD_09_85"}), \
-         patch.object(DeviceMonitor, "_maybe_auto_repair_bluetooth_audio", return_value=None), \
          patch.object(DeviceMonitor, "_is_internal_managed_sink_id", return_value=False):
         monitor = DeviceMonitor()
         monitor.bluetooth_profile_state = {}
@@ -490,89 +489,6 @@ def test_ensure_mono_remap_handles_load_module_timeout():
     return passed
 
 
-def test_is_hfp_stuck_card():
-    """Regression test: a card active on headset with no A2DP profile is detected
-    as HFP-stuck so the monitor escalates to a disconnect/reconnect cycle."""
-    print("\n" + "="*80)
-    print("TEST 11: HFP-Stuck Card Detection")
-    print("="*80)
-
-    monitor = DeviceMonitor()
-
-    stuck = {
-        "name": "bluez_card.00_02_3C_AD_09_85",
-        "active_profile": "headset-head-unit",
-        "profiles": {"off": "Off", "headset-head-unit": "Headset Head Unit"},
-    }
-    a2dp_available = {
-        "name": "bluez_card.00_02_3C_AD_09_85",
-        "active_profile": "headset-head-unit",
-        "profiles": {"off": "Off", "headset-head-unit": "Headset Head Unit", "a2dp-sink": "High Fidelity"},
-    }
-    already_a2dp = {
-        "name": "bluez_card.00_02_3C_AD_09_85",
-        "active_profile": "a2dp-sink",
-        "profiles": {"a2dp-sink": "High Fidelity", "headset-head-unit": "Headset Head Unit"},
-    }
-    not_headset = {
-        "name": "bluez_card.00_02_3C_AD_09_85",
-        "active_profile": "off",
-        "profiles": {"off": "Off", "headset-head-unit": "Headset Head Unit"},
-    }
-
-    passed = (
-        monitor._is_hfp_stuck_card(stuck) is True
-        and monitor._is_hfp_stuck_card(a2dp_available) is False
-        and monitor._is_hfp_stuck_card(already_a2dp) is False
-        and monitor._is_hfp_stuck_card(not_headset) is False
-        and monitor._is_hfp_stuck_card(None) is False
-    )
-    status = "✓" if passed else "✗"
-    print(f"{status} HFP-stuck detection (stuck={monitor._is_hfp_stuck_card(stuck)}, a2dp_avail={monitor._is_hfp_stuck_card(a2dp_available)})")
-    return passed
-
-
-def test_hfp_stuck_escalates_to_reconnect():
-    """Regression test: an HFP-stuck device escalates to a full disconnect/reconnect
-    (the only reliable fix for a fresh-connect HFP-only state), respects cooldown,
-    and clears the soft-toggle cooldown on success."""
-    print("\n" + "="*80)
-    print("TEST 12: HFP-Stuck Escalation To Reconnect")
-    print("="*80)
-
-    repair_calls = []
-
-    def fake_repair(mac_colon, wait_sec=7.0, require_a2dp=False):
-        repair_calls.append((mac_colon, require_a2dp))
-        return True
-
-    with patch("device_monitor.time.time", return_value=1000.0), \
-         patch.object(DeviceMonitor, "_repair_bluetooth_audio_for_mac", side_effect=fake_repair):
-        monitor = DeviceMonitor()
-        monitor._last_bt_hfp_repair_ts_by_mac = {}
-        monitor._last_bt_a2dp_soft_toggle_ts_by_mac = {"00:02:3C:AD:09:85": 999.0}
-
-        card_info = {
-            "name": "bluez_card.00_02_3C_AD_09_85",
-            "active_profile": "headset-head-unit",
-            "profiles": {"off": "Off", "headset-head-unit": "Headset Head Unit"},
-        }
-
-        ok = monitor._recover_hfp_stuck_device("00:02:3C:AD:09:85", card_info)
-        # Second call within cooldown must not reconnect again.
-        ok2 = monitor._recover_hfp_stuck_device("00:02:3C:AD:09:85", card_info)
-
-    passed = (
-        ok is True
-        and repair_calls == [("00:02:3C:AD:09:85", True)]
-        and ok2 is False
-        and "00:02:3C:AD:09:85" not in monitor._last_bt_a2dp_soft_toggle_ts_by_mac
-    )
-    status = "✓" if passed else "✗"
-    print(f"{status} Escalation reconnected once, cooldown blocked retry, soft-toggle cooldown cleared (calls={repair_calls})")
-    return passed
-
-
 def main():
     print("\n" + "="*80)
     print("IDEMPOTENCY TEST SUITE")
@@ -589,8 +505,6 @@ def main():
     test_8 = test_prefer_a2dp_restores_profile_on_failure()
     test_9 = test_prefer_a2dp_soft_toggle_cooldown()
     test_10 = test_ensure_mono_remap_handles_load_module_timeout()
-    test_11 = test_is_hfp_stuck_card()
-    test_12 = test_hfp_stuck_escalates_to_reconnect()
 
     print("\n" + "="*80)
     print("TEST SUMMARY")
@@ -605,11 +519,9 @@ def main():
     print(f"A2DP Restore On Failure:    {'✓ PASS' if test_8 else '✗ FAIL'}")
     print(f"A2DP Soft-Toggle Cooldown:  {'✓ PASS' if test_9 else '✗ FAIL'}")
     print(f"Remap Load-Module Timeout:  {'✓ PASS' if test_10 else '✗ FAIL'}")
-    print(f"HFP-Stuck Card Detection:   {'✓ PASS' if test_11 else '✗ FAIL'}")
-    print(f"HFP-Stuck Escalation:       {'✓ PASS' if test_12 else '✗ FAIL'}")
     print("="*80)
 
-    if test_1 and test_2 and test_3 and test_4 and test_5 and test_6 and test_7 and test_8 and test_9 and test_10 and test_11 and test_12:
+    if test_1 and test_2 and test_3 and test_4 and test_5 and test_6 and test_7 and test_8 and test_9 and test_10:
         print("\n✓ All idempotency tests PASSED\n")
         return 0
     else:

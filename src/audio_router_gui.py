@@ -163,7 +163,7 @@ try:
     from audio_router_engine import AudioRouterEngine
     from intelligent_audio_router import IntelligentAudioRouter
     from portal_background import request_flatpak_login_autostart
-    from bluez_config import run_bluetooth_settings_apply, check_applied_state
+
 except ImportError as e:
     logger.error(f"Failed to import audio router modules: {e}")
     sys.exit(1)
@@ -378,33 +378,6 @@ class UpdateCheckThread(QThread):
             self.result.emit(_update_download(self.download_url))
 
 
-class BluetoothSettingsThread(QThread):
-    """Apply BlueZ first-connect A2DP fixes via pkexec in the background."""
-    result = pyqtSignal(object)  # (ok, message)
-
-    def __init__(
-        self,
-        reverse_service_discovery: Optional[bool] = None,
-        dbus_policy: Optional[bool] = None,
-        wireplumber_a2dp: Optional[bool] = None,
-    ):
-        super().__init__()
-        self.reverse_service_discovery = reverse_service_discovery
-        self.dbus_policy = dbus_policy
-        self.wireplumber_a2dp = wireplumber_a2dp
-
-    def run(self):
-        try:
-            ok, msg = run_bluetooth_settings_apply(
-                reverse_service_discovery=self.reverse_service_discovery,
-                dbus_policy=self.dbus_policy,
-                wireplumber_a2dp=self.wireplumber_a2dp,
-            )
-        except Exception as e:
-            ok, msg = False, f"BlueZ settings apply failed: {e}"
-        self.result.emit((ok, msg))
-
-
 class RuleEditorDialog(QDialog):
     """Dialog for creating/editing routing rules"""
     
@@ -526,9 +499,6 @@ def _load_app_settings() -> Dict[str, Any]:
         "close_to_tray": bool,
         "auto_mono_single_channel_bluetooth": bool,
         "force_bluetooth_mono": bool,
-        "bluez_reverse_service_discovery": bool,
-        "bluez_dbus_policy": bool,
-        "bluez_wireplumber_a2dp": bool,
         "theme": str,
         "devices_streams_split_pct": int,
     }
@@ -578,9 +548,6 @@ def _save_app_settings(data: Dict[str, Any]) -> None:
         "close_to_tray",
         "auto_mono_single_channel_bluetooth",
         "force_bluetooth_mono",
-        "bluez_reverse_service_discovery",
-        "bluez_dbus_policy",
-        "bluez_wireplumber_a2dp",
         "theme",
         "devices_streams_split_pct",
     }
@@ -984,9 +951,6 @@ class AudioRouterGUI(QMainWindow):
         self.close_to_tray = settings.get('close_to_tray', False)
         self.auto_mono_single_channel_bluetooth = settings.get('auto_mono_single_channel_bluetooth', True)
         self.force_bluetooth_mono = settings.get('force_bluetooth_mono', False)
-        self.bluez_reverse_service_discovery = settings.get('bluez_reverse_service_discovery', False)
-        self.bluez_dbus_policy = settings.get('bluez_dbus_policy', True)
-        self.bluez_wireplumber_a2dp = settings.get('bluez_wireplumber_a2dp', True)
         self.theme_setting = settings.get('theme', 'system')
         self.devices_streams_split_pct = int(settings.get('devices_streams_split_pct', 50) or 50)
         self.devices_streams_split_pct = max(20, min(80, self.devices_streams_split_pct))
@@ -1006,12 +970,6 @@ class AudioRouterGUI(QMainWindow):
         self.update_service_status()
         if self.start_routing_on_launch and self.config_file.exists():
             self._start_in_app_monitor()
-
-        # Apply the BlueZ/WirePlumber first-connect A2DP preventatives that are
-        # enabled in settings but not yet present on disk. Deferred so the
-        # pkexec authorization dialog appears on top of the visible window, and
-        # only fires when something is actually missing (idempotent in practice).
-        QTimer.singleShot(1500, self._maybe_auto_apply_bluez_preventatives)
 
     def _setup_tray(self):
         """Create system tray icon if available."""
@@ -1533,55 +1491,6 @@ class AudioRouterGUI(QMainWindow):
         self.close_to_tray_check.setToolTip("When enabled, closing the window hides the app to the tray; use tray menu to Show or Quit.")
         left_col.addWidget(self.close_to_tray_check)
 
-        bluez_group = QGroupBox("Bluetooth (BlueZ)")
-        bluez_layout = QVBoxLayout()
-        bluez_hint = QLabel(
-            "Prevents the first connect after boot falling back to HSP/HFP instead of "
-            "high-fidelity A2DP. BlueZ brings up HFP and A2DP together and the sound "
-            "server can grab the A2DP transport before BlueZ finishes SDP discovery, so "
-            "A2DP is dropped (bluez/bluez#1545). These apply system settings via an admin "
-            "(pkexec) dialog and restart the bluetooth service."
-        )
-        bluez_hint.setWordWrap(True)
-        bluez_layout.addWidget(bluez_hint)
-
-        self.bluez_wireplumber_a2dp_check = QCheckBox(
-            "Auto-connect A2DP only (WirePlumber: prevent the HFP+A2DP connect race)"
-        )
-        self.bluez_wireplumber_a2dp_check.setChecked(self.bluez_wireplumber_a2dp)
-        self.bluez_wireplumber_a2dp_check.setToolTip(
-            "Primary fix. Tells WirePlumber to auto-connect only the high-fidelity A2DP "
-            "sink; HFP/HSP connects on demand when a microphone is used. This stops the "
-            "simultaneous HFP+A2DP connect that drops A2DP, so no disconnect/reconnect is "
-            "needed. Recommended and on by default."
-        )
-        bluez_layout.addWidget(self.bluez_wireplumber_a2dp_check)
-
-        self.bluez_reverse_sdp_check = QCheckBox(
-            "Skip reverse service discovery (ReverseServiceDiscovery off)"
-        )
-        self.bluez_reverse_sdp_check.setChecked(self.bluez_reverse_service_discovery)
-        self.bluez_reverse_sdp_check.setToolTip(
-            "Stops BlueZ querying the headset's SDP records on first connect, removing "
-            "the discovery window the sound server races into. May leave AVRCP version "
-            "info incomplete for the device."
-        )
-        bluez_layout.addWidget(self.bluez_reverse_sdp_check)
-
-        self.bluez_dbus_policy_check = QCheckBox(
-            "Allow WirePlumber D-Bus replies (install bluetooth-wireplumber policy)"
-        )
-        self.bluez_dbus_policy_check.setChecked(self.bluez_dbus_policy)
-        self.bluez_dbus_policy_check.setToolTip(
-            "Installs a D-Bus system policy so WirePlumber (PipeWire) can send "
-            "method_return/error messages back to bluetoothd. Without it the A2DP sink "
-            "can be missing until the bluetooth service is restarted (bluez issue #1924)."
-        )
-        bluez_layout.addWidget(self.bluez_dbus_policy_check)
-
-        bluez_group.setLayout(bluez_layout)
-        left_col.addWidget(bluez_group)
-
         self.auto_mono_single_channel_bluetooth_check = QCheckBox(
             "Auto-mono for single-earbud Bluetooth (keep stereo when both channels are available)"
         )
@@ -1757,25 +1666,14 @@ class AudioRouterGUI(QMainWindow):
         start_routing = self.start_routing_check.isChecked()
         close_to_tray = self.close_to_tray_check.isChecked()
         auto_mono_single_channel_bluetooth = self.auto_mono_single_channel_bluetooth_check.isChecked()
-        bluez_reverse_service_discovery = self.bluez_reverse_sdp_check.isChecked()
-        bluez_dbus_policy = self.bluez_dbus_policy_check.isChecked()
-        bluez_wireplumber_a2dp = self.bluez_wireplumber_a2dp_check.isChecked()
         theme_map = {0: "system", 1: "light", 2: "dark"}
         theme = theme_map.get(self.theme_combo.currentIndex(), "system")
         mono_changed = auto_mono_single_channel_bluetooth != self.auto_mono_single_channel_bluetooth
-        bluez_changed = (
-            bluez_reverse_service_discovery != self.bluez_reverse_service_discovery
-            or bluez_dbus_policy != self.bluez_dbus_policy
-            or bluez_wireplumber_a2dp != self.bluez_wireplumber_a2dp
-        )
         self.login_autostart = login_autostart
         self.start_minimized_at_login = start_minimized_at_login
         self.start_routing_on_launch = start_routing
         self.close_to_tray = close_to_tray
         self.auto_mono_single_channel_bluetooth = auto_mono_single_channel_bluetooth
-        self.bluez_reverse_service_discovery = bluez_reverse_service_discovery
-        self.bluez_dbus_policy = bluez_dbus_policy
-        self.bluez_wireplumber_a2dp = bluez_wireplumber_a2dp
         self.theme_setting = theme
         _save_app_settings({
             **_load_app_settings(),
@@ -1785,9 +1683,6 @@ class AudioRouterGUI(QMainWindow):
             'close_to_tray': close_to_tray,
             'auto_mono_single_channel_bluetooth': auto_mono_single_channel_bluetooth,
             'force_bluetooth_mono': self.force_bluetooth_mono,
-            'bluez_reverse_service_discovery': bluez_reverse_service_discovery,
-            'bluez_dbus_policy': bluez_dbus_policy,
-            'bluez_wireplumber_a2dp': bluez_wireplumber_a2dp,
             'theme': theme,
         })
         # Defer palette apply to next event loop to avoid re-entrancy crash in Qt
@@ -1818,9 +1713,6 @@ class AudioRouterGUI(QMainWindow):
                             "close_to_tray": self.close_to_tray,
                             "auto_mono_single_channel_bluetooth": self.auto_mono_single_channel_bluetooth,
                             "force_bluetooth_mono": self.force_bluetooth_mono,
-                            "bluez_reverse_service_discovery": self.bluez_reverse_service_discovery,
-                            "bluez_dbus_policy": self.bluez_dbus_policy,
-                            "bluez_wireplumber_a2dp": self.bluez_wireplumber_a2dp,
                             "theme": self.theme_setting,
                         })
                         QMessageBox.warning(self, "Login autostart", msg)
@@ -1840,82 +1732,6 @@ class AudioRouterGUI(QMainWindow):
         if mono_changed and self._router_running():
             self.restart_service()
             self.statusBar().showMessage("Mono routing preference updated; router restarted", 3000)
-
-        if bluez_changed:
-            self._apply_bluez_settings(
-                bluez_reverse_service_discovery,
-                bluez_dbus_policy,
-                bluez_wireplumber_a2dp,
-            )
-
-    def _maybe_auto_apply_bluez_preventatives(self) -> None:
-        """Apply enabled BlueZ preventatives that are missing on disk (startup).
-
-        Only triggers the pkexec flow when an enabled preventative is not yet
-        present, so the authorization dialog appears at most once (until it is
-        applied). This keeps prevention active without requiring the user to
-        open settings and authenticate by hand.
-        """
-        if getattr(self, "_bluez_settings_thread", None) and self._bluez_settings_thread.isRunning():
-            return
-        try:
-            applied = check_applied_state()
-        except Exception as e:
-            logger.debug(f"Could not check BlueZ preventative state: {e}")
-            return
-        desired = {
-            "reverse_service_discovery": self.bluez_reverse_service_discovery,
-            "dbus_policy": self.bluez_dbus_policy,
-            "wireplumber_a2dp": self.bluez_wireplumber_a2dp,
-        }
-        if any(desired[k] and not applied[k] for k in desired):
-            logger.info("BlueZ preventatives incomplete on disk; applying enabled settings")
-            try:
-                self._apply_bluez_settings(
-                    self.bluez_reverse_service_discovery,
-                    self.bluez_dbus_policy,
-                    self.bluez_wireplumber_a2dp,
-                )
-            except Exception as e:
-                logger.error(f"Failed to start BlueZ settings apply: {e}")
-
-    def _apply_bluez_settings(
-        self,
-        reverse_service_discovery: bool,
-        dbus_policy: bool,
-        wireplumber_a2dp: bool,
-    ) -> None:
-        """Apply BlueZ first-connect A2DP fixes via pkexec (background, auth dialog)."""
-        if getattr(self, "_bluez_settings_thread", None) and self._bluez_settings_thread.isRunning():
-            self.statusBar().showMessage("BlueZ settings still being applied...", 3000)
-            return
-
-        self.statusBar().showMessage("Authorize BlueZ settings change in the system dialog...", 8000)
-        thread = BluetoothSettingsThread(
-            reverse_service_discovery=reverse_service_discovery,
-            dbus_policy=dbus_policy,
-            wireplumber_a2dp=wireplumber_a2dp,
-        )
-        thread.result.connect(self._on_bluez_settings_result)
-        thread.finished.connect(lambda t=thread: self._on_bluez_settings_finished(t))
-        self._bluez_settings_thread = thread
-        thread.start()
-
-    def _on_bluez_settings_result(self, result) -> None:
-        ok, message = result
-        if ok:
-            self.statusBar().showMessage(message or "BlueZ settings applied.", 8000)
-        else:
-            QMessageBox.warning(
-                self,
-                "BlueZ settings",
-                f"Could not apply BlueZ settings.\n\n{message}",
-            )
-            self.statusBar().showMessage("BlueZ settings not applied", 6000)
-
-    def _on_bluez_settings_finished(self, thread: BluetoothSettingsThread) -> None:
-        if getattr(self, "_bluez_settings_thread", None) is thread:
-            self._bluez_settings_thread = None
 
     def _is_internal_remap_sink_id(self, sink_id: str) -> bool:
         return (sink_id or '').startswith('sinkswitch_mono.')
