@@ -82,14 +82,16 @@ once per device regardless of which path triggers it.
 - `src/device_monitor.py`
 - `src/host_command.py` — route `bluetoothctl` (and `pw-cli`) to the host in Flatpak
 - `tests/test_idempotency.py` (existing HFP-stuck tests from prior session)
-- `tests/test_bluez_config.py` — new `host_cmd` Flatpak routing tests
+- `tests/test_bluez_config.py` — new `host_cmd` Flatpak routing tests (later
+  removed along with the BlueZ profile-prevention workarounds)
 
 ## Verification
 
 - `python3 tests/test_idempotency.py` — all 12 tests PASS (including
   HFP-stuck detection and escalation/cooldown).
 - `python3 -m pytest tests/test_bluez_config.py` — 14 tests PASS (new
-  `host_cmd` routing tests for bluetoothctl/pactl in and out of Flatpak).
+  `host_cmd` routing tests for bluetoothctl/pactl in and out of Flatpak; file
+  since removed with the prevention workarounds).
 - `python3 -m py_compile` on changed modules — OK.
 - Live verification inside the Flatpak sandbox: host-spawned `bluetoothctl`
   reaches system bluetoothd; a manual host-spawned disconnect/reconnect

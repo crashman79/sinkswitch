@@ -573,39 +573,6 @@ class AudioRouterEngine:
         self._required_mono_masters = set()
         self._cleanup_sinkswitch_remaps(startup=True)
     
-    def _ensure_a2dp_profile(self, sink_name: str, allow_soft_toggle: bool = False) -> bool:
-        """Ensure Bluetooth device is using A2DP (high-fidelity) profile
-        
-        Args:
-            sink_name: Bluetooth sink name (e.g., 'bluez_output.00_02_3C_AD_09_85.1')
-            allow_soft_toggle: Permit the destructive off→a2dp transport toggle.
-                Routing hot paths leave this False so they never disrupt the audio
-                server; the low-frequency profile monitor handles recovery.
-        
-        Returns:
-            True if A2DP profile is active or was successfully set
-        """
-        try:
-            # Extract MAC address from sink name
-            # Format: bluez_output.00_02_3C_AD_09_85.1
-            if 'bluez' not in sink_name:
-                return True  # Not a Bluetooth device
-            
-            parts = sink_name.split('.')
-            if len(parts) < 3:
-                return False
-            
-            device_address = parts[1].replace('_', ':')  # Convert to colon format
-            
-            # Attempt to set A2DP profile
-            return self.device_monitor.prefer_a2dp_profile(
-                device_address, allow_soft_toggle=allow_soft_toggle
-            )
-        
-        except Exception as e:
-            logger.debug(f"Failed to ensure A2DP profile: {e}")
-            return False
-
     def _generate_fallback_rules(self) -> List[Dict]:
         """Auto-generate routing rules from connected devices when none are configured."""
         try:
@@ -675,16 +642,6 @@ class AudioRouterEngine:
             all_targets = target_variants
         all_targets = self._prioritize_target_sinks(target_device, all_targets)
 
-        # Try to restore A2DP before selecting a sink variant, so we avoid
-        # routing streams into non-playback Bluetooth profiles.
-        first_bluetooth_target = next(
-            (target for target in all_targets if 'bluez' in (target or '').lower()),
-            None,
-        )
-        if first_bluetooth_target:
-            self._ensure_a2dp_profile(first_bluetooth_target)
-            all_targets = self._prioritize_target_sinks(target_device, all_targets)
-        
         try:
             if not all_targets:
                 return {
@@ -711,10 +668,9 @@ class AudioRouterEngine:
                 connected_target = target
                 break
             logger.debug(
-                "Rule %r target resolution: preferred=%r bt_target=%r probes=%s connected_choice=%r",
+                "Rule %r target resolution: preferred=%r probes=%s connected_choice=%r",
                 rule_name,
                 target_device,
-                first_bluetooth_target,
                 target_probe,
                 connected_target,
             )
@@ -737,10 +693,6 @@ class AudioRouterEngine:
                 keywords,
             )
 
-            # Keep profile maintenance off the routing hot path so stream moves
-            # happen first for newly created browser/media sink-inputs.
-            if 'bluez' in connected_target:
-                self._ensure_a2dp_profile(connected_target)
             target_label = connected_target
             for d in self.device_monitor.get_devices():
                 if d.get('id') == connected_target:
