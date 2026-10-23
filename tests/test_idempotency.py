@@ -489,6 +489,150 @@ def test_ensure_mono_remap_handles_load_module_timeout():
     return passed
 
 
+def _make_engine_without_cleanup():
+    with patch.object(AudioRouterEngine, "_cleanup_sinkswitch_remaps", return_value=None):
+        return AudioRouterEngine()
+
+
+def test_bt_profile_empty_defers_routing():
+    """A BlueZ sink node that exists before its A2DP transport is attached must
+    not be used as a routing target (no remap, no stream moves)."""
+    print("\n" + "="*80)
+    print("TEST 11: Half-Connected Bluetooth Sink Is Not Routed To")
+    print("="*80)
+
+    remap_calls = []
+    engine = _make_engine_without_cleanup()
+    target = "bluez_output.00_02_3C_AD_09_85.1"
+
+    with patch.object(AudioRouterEngine, "_resolve_sink", return_value=("13", target)), \
+         patch.object(AudioRouterEngine, "_probe_bt_sink", return_value={
+             "id": "13", "name": target, "state": "IDLE",
+             "profile": "", "connection": "connected",
+         }), \
+         patch.object(AudioRouterEngine, "_get_bt_card_info_cached", return_value={
+             "name": "bluez_card.00_02_3C_AD_09_85",
+             "active_profile": "a2dp-sink",
+             "profiles": {"a2dp-sink": "High Fidelity Playback"},
+         }), \
+         patch.object(AudioRouterEngine, "_is_headset_profile_bluetooth_sink", return_value=False), \
+         patch.object(AudioRouterEngine, "_ensure_mono_remap_sink",
+                      side_effect=lambda m: remap_calls.append(m) or "sinkswitch_mono.should_not_exist"):
+        result = engine._get_effective_target_sink(target)
+
+    passed = result is None and not remap_calls
+    status = "✓" if passed else "✗"
+    print(f"{status} Not-ready transport deferred (result={result}, remap_calls={remap_calls})")
+    return passed
+
+
+def test_bt_node_churn_is_debounced():
+    """A Bluetooth sink instance change must settle for BT_SETTLE_SEC before a
+    remap is built; this coalesces profile-negotiation churn."""
+    print("\n" + "="*80)
+    print("TEST 12: Bluetooth Node Churn Is Debounced")
+    print("="*80)
+
+    target = "bluez_output.00_02_3C_AD_09_85.1"
+    engine = _make_engine_without_cleanup()
+    sink_ids = iter(["74", "271997", "271997"])
+
+    with patch.object(AudioRouterEngine, "_resolve_sink",
+                      side_effect=lambda *a, **k: (next(sink_ids), target)), \
+         patch.object(AudioRouterEngine, "_probe_bt_sink", return_value={
+             "id": "74", "name": target, "state": "IDLE",
+             "profile": "a2dp-sink", "connection": "connected",
+         }), \
+         patch.object(AudioRouterEngine, "_get_bt_card_info_cached", return_value={
+             "name": "bluez_card.00_02_3C_AD_09_85",
+             "active_profile": "a2dp-sink",
+         }), \
+         patch.object(AudioRouterEngine, "_is_headset_profile_bluetooth_sink", return_value=False), \
+         patch.object(AudioRouterEngine, "_is_single_channel_bluetooth_sink", return_value=True), \
+         patch.object(AudioRouterEngine, "_ensure_mono_remap_sink", return_value="sinkswitch_mono.ok"), \
+         patch("audio_router_engine.time.monotonic", return_value=1000.0):
+        first = engine._get_effective_target_sink(target)
+        churned = engine._get_effective_target_sink(target)
+
+    with patch.object(AudioRouterEngine, "_resolve_sink", return_value=("271997", target)), \
+         patch.object(AudioRouterEngine, "_probe_bt_sink", return_value={
+             "id": "271997", "name": target, "state": "IDLE",
+             "profile": "a2dp-sink", "connection": "connected",
+         }), \
+         patch.object(AudioRouterEngine, "_get_bt_card_info_cached", return_value={
+             "name": "bluez_card.00_02_3C_AD_09_85",
+             "active_profile": "a2dp-sink",
+         }), \
+         patch.object(AudioRouterEngine, "_is_headset_profile_bluetooth_sink", return_value=False), \
+         patch.object(AudioRouterEngine, "_is_single_channel_bluetooth_sink", return_value=True), \
+         patch.object(AudioRouterEngine, "_ensure_mono_remap_sink", return_value="sinkswitch_mono.ok"), \
+         patch("audio_router_engine.time.monotonic", return_value=1000.0 + AudioRouterEngine.BT_SETTLE_SEC + 0.1):
+        settled = engine._get_effective_target_sink(target)
+
+    passed = first == "sinkswitch_mono.ok" and churned is None and settled == "sinkswitch_mono.ok"
+    status = "✓" if passed else "✗"
+    print(f"{status} churn deferred then routed (first={first}, churned={churned}, settled={settled})")
+    return passed
+
+
+def test_apply_rule_defers_when_bt_not_ready():
+    """A deferred Bluetooth target returns a retry hint and moves no streams."""
+    print("\n" + "="*80)
+    print("TEST 13: Rule Apply Defers Instead Of Retrying Noisily")
+    print("="*80)
+
+    engine = _make_engine_without_cleanup()
+    target = "bluez_output.00_02_3C_AD_09_85.1"
+    engine._bt_state[target] = ("waiting", "profile-empty")
+    engine._bt_backoff_until[target] = 1234.0
+
+    with patch.object(AudioRouterEngine, "_prioritize_target_sinks",
+                      side_effect=lambda preferred, targets: list(targets)), \
+         patch.object(AudioRouterEngine, "_get_effective_target_sink", return_value=None):
+        result = engine._apply_rule({
+            "name": "deferred-rule",
+            "target_device": target,
+            "applications": ["firefox"],
+        })
+
+    passed = (
+        result.get("deferred") is True
+        and result.get("routed_count") == 0
+        and result.get("retry_after") is not None
+        and "A2DP" in result.get("message", "")
+    )
+    status = "✓" if passed else "✗"
+    print(f"{status} Deferred result: {result}")
+    return passed
+
+
+def test_default_fallback_does_not_move_to_unready_bt():
+    """Unmatched streams must stay put while the Bluetooth default is not ready."""
+    print("\n" + "="*80)
+    print("TEST 14: Default Fallback Skips Unready Bluetooth Output")
+    print("="*80)
+
+    engine = _make_engine_without_cleanup()
+    target = "bluez_output.00_02_3C_AD_09_85.1"
+    moves = []
+
+    with patch.object(DeviceMonitor, "get_default_sink", return_value=target), \
+         patch.object(AudioRouterEngine, "_resolve_sink", return_value=("13", target)), \
+         patch.object(AudioRouterEngine, "_is_headset_profile_bluetooth_sink", return_value=False), \
+         patch.object(AudioRouterEngine, "_evaluate_bt_readiness", return_value=(False, "profile-empty")), \
+         patch.object(AudioRouterEngine, "_get_sink_inputs", return_value=[
+             {"index": "1", "application_name": "firefox", "sink": "99"},
+         ]), \
+         patch.object(AudioRouterEngine, "_move_sink_input",
+                      side_effect=lambda *a: moves.append(a) or True):
+        result = engine._route_unmatched_streams_to_default([])
+
+    passed = result.get("deferred") is True and result.get("routed_count") == 0 and not moves
+    status = "✓" if passed else "✗"
+    print(f"{status} Fallback deferred (result={result}, moves={moves})")
+    return passed
+
+
 def main():
     print("\n" + "="*80)
     print("IDEMPOTENCY TEST SUITE")
@@ -505,6 +649,10 @@ def main():
     test_8 = test_prefer_a2dp_restores_profile_on_failure()
     test_9 = test_prefer_a2dp_soft_toggle_cooldown()
     test_10 = test_ensure_mono_remap_handles_load_module_timeout()
+    test_11 = test_bt_profile_empty_defers_routing()
+    test_12 = test_bt_node_churn_is_debounced()
+    test_13 = test_apply_rule_defers_when_bt_not_ready()
+    test_14 = test_default_fallback_does_not_move_to_unready_bt()
 
     print("\n" + "="*80)
     print("TEST SUMMARY")
@@ -519,9 +667,13 @@ def main():
     print(f"A2DP Restore On Failure:    {'✓ PASS' if test_8 else '✗ FAIL'}")
     print(f"A2DP Soft-Toggle Cooldown:  {'✓ PASS' if test_9 else '✗ FAIL'}")
     print(f"Remap Load-Module Timeout:  {'✓ PASS' if test_10 else '✗ FAIL'}")
+    print(f"BT Not-Ready Gate:          {'✓ PASS' if test_11 else '✗ FAIL'}")
+    print(f"BT Node-Churn Debounce:     {'✓ PASS' if test_12 else '✗ FAIL'}")
+    print(f"Deferred Rule Apply:        {'✓ PASS' if test_13 else '✗ FAIL'}")
+    print(f"Deferred Default Fallback:  {'✓ PASS' if test_14 else '✗ FAIL'}")
     print("="*80)
 
-    if test_1 and test_2 and test_3 and test_4 and test_5 and test_6 and test_7 and test_8 and test_9 and test_10:
+    if all([test_1, test_2, test_3, test_4, test_5, test_6, test_7, test_8, test_9, test_10, test_11, test_12, test_13, test_14]):
         print("\n✓ All idempotency tests PASSED\n")
         return 0
     else:

@@ -1,0 +1,22 @@
+SinkSwitch application icon attribution
+======================================
+
+The bundled SinkSwitch application icon is derived from the Breeze icon
+theme (breeze-icons), provided by the KDE Community.
+
+  Upstream: https://invent.kde.org/frameworks/breeze-icons
+  Original files:
+    devices/64/audio-card.svg
+    devices/22/audio-card-symbolic.svg
+  License: LGPL-3.0-or-later (and LGPL-2.1-only where applicable)
+
+The icon files are redistributed unmodified, only renamed under the
+SinkSwitch application id so the app can use a consistent icon on every
+desktop theme. The 128x128 PNG is rendered from the 64px SVG.
+
+License texts are included alongside this notice:
+  LICENSE-LGPL-3.0-or-later
+  LICENSE-LGPL-2.1-only
+
+The rest of SinkSwitch remains under the MIT license (see the repository
+README).

@@ -16,6 +16,7 @@ import shlex
 import shutil
 import subprocess
 import threading
+import time
 import ssl
 import urllib.error
 import urllib.request
@@ -92,17 +93,20 @@ def _brand_icon_path() -> Optional[Path]:
 
 
 def _desktop_icon_name() -> str:
-    """Icon= for generated .desktop files; Flatpak installs hicolor icons under this name."""
-    return "audio-card"
+    """Desktop/icon id for this app (Flatpak keeps its app id)."""
+    return os.environ.get("FLATPAK_ID", "io.github.crashman79.sinkswitch")
 
 
 def _app_icon():
-    """Return the icon used for window + tray + desktop launchers."""
+    """Return the icon used for window + titlebar + tray."""
     try:
         from PyQt6.QtGui import QIcon
-        ic = QIcon.fromTheme("audio-card")
-        if not ic.isNull():
-            return ic
+        # The app-id icon is the full-color Breeze audio-card artwork used by
+        # the titlebar and taskbar; the tray uses the symbolic app-id icon.
+        for name in (_desktop_icon_name(), "audio-card"):
+            ic = QIcon.fromTheme(name)
+            if not ic.isNull():
+                return ic
         bp = _brand_icon_path()
         return QIcon(str(bp)) if bp else QIcon()
     except Exception:
@@ -271,6 +275,10 @@ class MonitorThread(QThread):
         self.stop_event = threading.Event()
         self._temporary_routes: Dict[str, str] = {}
         self._temporary_routes_lock = threading.Lock()
+        self._apply_lock = threading.Lock()
+        self._retry_timer: Optional[threading.Timer] = None
+        self._retry_timer_lock = threading.Lock()
+        self._retry_timer_due = 0.0
         self.engine: Optional[AudioRouterEngine] = None
 
     def set_temporary_route(self, app_name: str, target_device: str) -> None:
@@ -321,24 +329,63 @@ class MonitorThread(QThread):
             )
             self.engine = engine
 
-            def regenerate_and_reload():
-                try:
-                    logger.info("Reloading routing configuration after device change...")
-                    reloaded_rules = ConfigParser(str(self.config_file)).parse()
-                    rules_ref[:] = reloaded_rules
-                    engine.apply_rules(rules_ref)
-                except Exception as e:
-                    logger.error(f"Failed to reload config: {e}")
+            def schedule_retry(delay: float) -> None:
+                """Re-apply after a deferred Bluetooth transport becomes usable."""
+                due = time.monotonic() + max(0.05, delay)
+                with self._retry_timer_lock:
+                    # Keep the earliest pending retry; backoff only grows.
+                    if self._retry_timer is not None and self._retry_timer_due <= due:
+                        return
+                    if self._retry_timer is not None:
+                        self._retry_timer.cancel()
+
+                    def fire():
+                        with self._retry_timer_lock:
+                            if self._retry_timer is not timer:
+                                return
+                            self._retry_timer = None
+                        if not self.stop_event.is_set():
+                            apply_rules()
+
+                    timer = threading.Timer(max(0.05, delay), fire)
+                    timer.daemon = True
+                    self._retry_timer = timer
+                    self._retry_timer_due = due
+                    timer.start()
 
             def apply_rules():
+                if self.stop_event.is_set():
+                    return
                 effective_rules = list(rules_ref) + self._temporary_rules()
-                results = engine.apply_rules(effective_rules)
+                with self._apply_lock:
+                    if self.stop_event.is_set():
+                        return
+                    results = engine.apply_rules(effective_rules)
+                retry_after = min(
+                    (
+                        float(r.get('retry_after'))
+                        for r in results
+                        if r.get('retry_after')
+                    ),
+                    default=None,
+                )
+                if retry_after is not None:
+                    schedule_retry(retry_after)
                 for r in results:
                     if r.get('success') and r.get('routed_count', 0) > 0:
                         self.routing_notification.emit(
                             "Audio Router",
                             f"{r.get('rule_name', 'Route')}: {r.get('message', '')}",
                         )
+
+            def regenerate_and_reload():
+                try:
+                    logger.info("Reloading routing configuration after device change...")
+                    reloaded_rules = ConfigParser(str(self.config_file)).parse()
+                    rules_ref[:] = reloaded_rules
+                    apply_rules()
+                except Exception as e:
+                    logger.error(f"Failed to reload config: {e}")
 
             # One shot on start/restart: watch loop can skip the first tick when rules_ref filters
             # device/stream events (e.g. no players yet); BT reconnect is fixed separately in DeviceMonitor.
@@ -355,9 +402,14 @@ class MonitorThread(QThread):
 
     def stop(self):
         self.stop_event.set()
+        with self._retry_timer_lock:
+            if self._retry_timer is not None:
+                self._retry_timer.cancel()
+                self._retry_timer = None
         try:
-            if self.engine is not None:
-                self.engine.cleanup_managed_sinks()
+            with self._apply_lock:
+                if self.engine is not None:
+                    self.engine.cleanup_managed_sinks()
         except Exception as e:
             logger.debug(f"Failed cleanup of managed mono sinks: {e}")
 
@@ -920,6 +972,45 @@ X-GNOME-Autostart-enabled=true
     return True, "Login autostart enabled (XDG autostart file)."
 
 
+def _flatpak_autostart_exec(start_minimized: bool) -> List[str]:
+    """Exec argv for an XDG autostart .desktop that launches the Flatpak app."""
+    app_id = os.environ.get("FLATPAK_ID", "io.github.crashman79.sinkswitch")
+    cmd = ["flatpak", "run", "--command=sinkswitch", app_id]
+    if start_minimized:
+        cmd.append("--minimized")
+    return cmd
+
+
+def _apply_flatpak_xdg_autostart(enable: bool, start_minimized: bool) -> Tuple[bool, str]:
+    """Flatpak: write/remove an XDG autostart .desktop so login autostart works
+    without depending on the xdg-desktop-portal Background backend."""
+    path = _native_login_autostart_desktop_path()
+    if not enable:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            return False, str(e)
+        return True, "Login autostart disabled (XDG autostart file removed)."
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exec_line = shlex.join(_flatpak_autostart_exec(start_minimized))
+    content = f"""[Desktop Entry]
+Type=Application
+Name=SinkSwitch
+Comment=Automatic audio routing (start at login)
+Exec={exec_line}
+Icon={_desktop_icon_name()}
+Terminal=false
+Categories=AudioVideo;Audio;
+X-GNOME-Autostart-enabled=true
+"""
+    try:
+        path.write_text(content)
+        path.chmod(0o644)
+    except OSError as e:
+        return False, str(e)
+    return True, "Login autostart enabled (XDG autostart file)."
+
+
 class AudioRouterGUI(QMainWindow):
     """Main GUI window for audio router"""
 
@@ -1038,9 +1129,13 @@ class AudioRouterGUI(QMainWindow):
             p.end()
             return QPixmap.fromImage(out)
 
-        # Tray icons are typically rendered on dark/light panels; prefer a symbolic
-        # theme icon if available so the DE can pick appropriate colors.
-        ic = QIcon.fromTheme("audio-card-symbolic")
+        # Prefer the bundled symbolic app icon, then the host theme's symbolic
+        # audio-card, then the full-color app icon.
+        ic = QIcon()
+        for name in (f"{_desktop_icon_name()}-symbolic", "audio-card-symbolic"):
+            ic = QIcon.fromTheme(name)
+            if not ic.isNull():
+                break
         if not ic.isNull():
             pm = ic.pixmap(QSize(22, 22))
             if not pm.isNull():
@@ -1693,34 +1788,27 @@ class AudioRouterGUI(QMainWindow):
 
         pair = (login_autostart, start_minimized_at_login)
         if os.environ.get("FLATPAK_ID"):
-            if pair != self._portal_login_snapshot:
-                self.statusBar().showMessage("Complete the system dialog for login autostart...", 6000)
-
-                def _on_portal_done(ok: bool, msg: str) -> None:
-                    if ok:
-                        self._portal_login_snapshot = pair
-                        self.statusBar().showMessage(msg, 8000)
+            # XDG autostart file is the reliable mechanism and works even when the
+            # xdg-desktop-portal Background backend is unavailable. Apply it first.
+            ok_xdg, msg_xdg = _apply_flatpak_xdg_autostart(login_autostart, start_minimized_at_login)
+            changed = pair != self._portal_login_snapshot
+            self._portal_login_snapshot = pair
+            if ok_xdg:
+                self.statusBar().showMessage(msg_xdg, 5000)
+            else:
+                self.statusBar().showMessage(f"Autostart file: {msg_xdg}", 6000)
+            # Best-effort portal registration for DEs that prefer it. Its failure is
+            # non-fatal now that the XDG autostart file already handles login start.
+            if changed:
+                def _on_portal_done(pok: bool, pmsg: str) -> None:
+                    if pok:
+                        logger.info("Portal login-autostart enabled: %s", pmsg)
                     else:
-                        self.login_autostart_check.setChecked(self._portal_login_snapshot[0])
-                        self.start_minimized_at_login_check.setChecked(self._portal_login_snapshot[1])
-                        self.login_autostart = self._portal_login_snapshot[0]
-                        self.start_minimized_at_login = self._portal_login_snapshot[1]
-                        _save_app_settings({
-                            **_load_app_settings(),
-                            "login_autostart": self._portal_login_snapshot[0],
-                            "start_minimized_at_login": self._portal_login_snapshot[1],
-                            "start_routing_on_launch": self.start_routing_on_launch,
-                            "close_to_tray": self.close_to_tray,
-                            "auto_mono_single_channel_bluetooth": self.auto_mono_single_channel_bluetooth,
-                            "force_bluetooth_mono": self.force_bluetooth_mono,
-                            "theme": self.theme_setting,
-                        })
-                        QMessageBox.warning(self, "Login autostart", msg)
-                        self.statusBar().showMessage("Login autostart unchanged", 4000)
+                        logger.warning(
+                            "Portal login-autostart best-effort failed (XDG fallback active): %s", pmsg
+                        )
 
                 request_flatpak_login_autostart(self, login_autostart, start_minimized_at_login, _on_portal_done)
-            else:
-                self.statusBar().showMessage("Settings saved", 2000)
         else:
             ok, msg = _apply_native_login_autostart(login_autostart, start_minimized_at_login)
             if ok:
@@ -2567,6 +2655,10 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("SinkSwitch")
+    # Without an explicit desktop file name Qt exposes the process name
+    # ("python3"), which KDE can match to another app's StartupWMClass.
+    app.setDesktopFileName(_desktop_icon_name())
+    app.setApplicationDisplayName("SinkSwitch")
     ic = _app_icon()
     if not ic.isNull():
         app.setWindowIcon(ic)

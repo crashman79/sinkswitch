@@ -7,7 +7,7 @@ import subprocess
 import logging
 import re
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from device_monitor import DeviceMonitor
 from host_command import host_cmd, SUBPROCESS_TEXT_KW
 from routing_latency_log import log_latency_event
@@ -18,7 +18,25 @@ logger = logging.getLogger(__name__)
 class AudioRouterEngine:
     """Engine for applying audio routing rules"""
     MONO_REMAP_PREFIX = 'sinkswitch_mono.'
-    
+
+    # BlueZ/pipewire expose a Bluetooth sink node before the transport is
+    # actually usable.  These constants keep routing out of that window.
+    BT_SETTLE_SEC = 2.5
+    BT_BACKOFF_INITIAL_SEC = 1.0
+    BT_BACKOFF_MAX_SEC = 10.0
+    BT_TRANSPORT_FAILED_SEC = 15.0
+    BT_CARD_INFO_TTL_SEC = 1.5
+
+    _BT_REASON_LABELS = {
+        'sink-missing': 'sink not present yet',
+        'unavailable': 'sink unavailable',
+        'settling': 'transport still settling',
+        'profile-empty': 'A2DP profile not active yet',
+        'profile-mismatch': 'card/sink profile mismatch',
+        'card-off': 'card profile is off',
+        'card-profile-unknown': 'card profile unknown',
+    }
+
     def __init__(
         self,
         auto_mono_single_channel_bluetooth: bool = True,
@@ -30,8 +48,262 @@ class AudioRouterEngine:
         self._mono_sink_cache: Dict[str, str] = {}
         self._mono_master_sink_id_cache: Dict[str, str] = {}
         self._required_mono_masters: Set[str] = set()
+        # Bluetooth readiness / debounce / backoff state.
+        self._bt_observed_master_ids: Dict[str, str] = {}
+        self._bt_settle_until: Dict[str, float] = {}
+        self._bt_backoff_sec: Dict[str, float] = {}
+        self._bt_backoff_until: Dict[str, float] = {}
+        self._bt_not_ready_since: Dict[str, float] = {}
+        self._bt_state: Dict[str, Tuple[str, str]] = {}
+        self._bt_card_info_cache: Dict[str, Tuple[float, Optional[Dict]]] = {}
+        self._rate_limited_logs: Dict[str, float] = {}
         # Clean stale remap modules from earlier sessions.
         self._cleanup_sinkswitch_remaps(startup=True)
+
+    @staticmethod
+    def _bt_mac_from_sink(sink_name: str) -> Optional[str]:
+        """Extract the Bluetooth address from a bluez_output/bluez_card id."""
+        parts = (sink_name or '').split('.')
+        if len(parts) < 3 or 'bluez' not in parts[0].lower():
+            return None
+        return parts[1].replace('_', ':')
+
+    def _bt_reason_label(self, reason: str) -> str:
+        return self._BT_REASON_LABELS.get(reason, reason or 'not ready')
+
+    def _log_rate_limited(
+        self,
+        key: str,
+        message: str,
+        *args: Any,
+        level: int = logging.WARNING,
+        interval: float = 60.0,
+    ) -> None:
+        """Log a repeated condition once per interval, debug afterwards."""
+        now = time.monotonic()
+        last = self._rate_limited_logs.get(key)
+        if last is not None and (now - last) < interval:
+            logger.debug(message, *args)
+            return
+        self._rate_limited_logs[key] = now
+        logger.log(level, message, *args)
+
+    def _probe_bt_sink(self, sink_name: str) -> Optional[Dict[str, Any]]:
+        """Read the live sink block for a Bluetooth sink.
+
+        Returns None when the sink block cannot be read so callers can fail open
+        on non-BlueZ/PulseAudio setups instead of blocking all routing.
+        """
+        try:
+            result = subprocess.run(
+                host_cmd(['pactl', 'list', 'sinks']),
+                capture_output=True,
+                text=True,
+                **SUBPROCESS_TEXT_KW,
+                timeout=5,
+                check=False,
+            )
+            if result.returncode != 0:
+                return None
+
+            current: Optional[Dict[str, Any]] = None
+            for raw_line in result.stdout.split('\n'):
+                line = raw_line.strip()
+                if line.startswith('Sink #'):
+                    if current and current.get('name') == sink_name:
+                        return current
+                    current = {
+                        'id': line.split('#', 1)[1].strip(),
+                        'name': '',
+                        'state': '',
+                        'profile': None,
+                        'connection': None,
+                    }
+                    continue
+                if current is None:
+                    continue
+                if line.startswith('Name:'):
+                    current['name'] = line.split(':', 1)[1].strip()
+                elif line.startswith('State:'):
+                    current['state'] = line.split(':', 1)[1].strip()
+                elif line.startswith('api.bluez5.profile') and '=' in line:
+                    current['profile'] = line.split('=', 1)[1].strip().strip('"')
+                elif line.startswith('api.bluez5.connection') and '=' in line:
+                    current['connection'] = line.split('=', 1)[1].strip().strip('"')
+
+            if current and current.get('name') == sink_name:
+                return current
+            return None
+        except Exception as e:
+            logger.debug("Failed to probe Bluetooth sink %s: %s", sink_name, e)
+            return None
+
+    def _get_bt_card_info_cached(self, device_address: str) -> Optional[Dict]:
+        """Return Bluetooth card info with a short TTL to avoid per-pass churn."""
+        now = time.monotonic()
+        cached = self._bt_card_info_cache.get(device_address)
+        if cached and (now - cached[0]) < self.BT_CARD_INFO_TTL_SEC:
+            return cached[1]
+        try:
+            info = self.device_monitor.get_bluetooth_card_info(device_address)
+        except Exception as e:
+            logger.debug("Failed to read Bluetooth card info for %s: %s", device_address, e)
+            info = None
+        self._bt_card_info_cache[device_address] = (now, info)
+        return info
+
+    def _evaluate_bt_readiness(self, master_sink: str) -> Tuple[bool, str]:
+        """Return (ready, reason) for a Bluetooth master sink.
+
+        A sink node existing in ``pactl`` does not mean the A2DP transport is
+        usable.  If we pin a remap or move a stream while BlueZ is still
+        negotiating, PipeWire is forced to Acquire a transport that is not
+        ready yet -- exactly the window that exposes the BlueZ 5.87 SEP-cache
+        failure.  Require an active matching profile and let node-instance
+        churn settle before touching the device.
+        """
+        if 'bluez' not in (master_sink or '').lower():
+            return True, 'not-bluetooth'
+
+        resolved = self._resolve_sink(master_sink, allow_managed_remaps=False)
+        if not resolved:
+            return False, 'sink-missing'
+        sink_id, sink_name = resolved
+
+        now = time.monotonic()
+        observed_id = self._bt_observed_master_ids.get(master_sink)
+        if observed_id is None:
+            # First sighting in this process: do not delay startup routing.
+            self._bt_observed_master_ids[master_sink] = sink_id
+        elif observed_id != sink_id:
+            # pipewire/BlueZ recreated the node during profile negotiation.
+            # Coalesce the churn before rebuilding remaps or moving streams.
+            self._bt_observed_master_ids[master_sink] = sink_id
+            self._bt_settle_until[master_sink] = now + self.BT_SETTLE_SEC
+            self._bt_backoff_sec.pop(master_sink, None)
+            self._bt_backoff_until.pop(master_sink, None)
+            logger.info(
+                "Bluetooth sink instance changed for %s (%s -> %s); "
+                "waiting %.1fs for the transport to settle",
+                master_sink,
+                observed_id,
+                sink_id,
+                self.BT_SETTLE_SEC,
+            )
+
+        if now < self._bt_settle_until.get(master_sink, 0.0):
+            return False, 'settling'
+
+        probe = self._probe_bt_sink(sink_name)
+        if probe:
+            state = (probe.get('state') or '').upper()
+            if state == 'UNAVAILABLE':
+                return False, 'unavailable'
+
+            profile = probe.get('profile')
+            if profile is not None:
+                profile = profile.strip().lower()
+                if not profile:
+                    # BlueZ created the node but has not attached an A2DP
+                    # transport yet; this is the half-connected state.
+                    return False, 'profile-empty'
+                if not (profile.startswith('a2dp') or profile.startswith('headset')):
+                    return False, f'profile:{profile}'
+
+            connection = (probe.get('connection') or '').strip().lower()
+            if connection and connection != 'connected':
+                return False, f'connection:{connection}'
+
+        mac = self._bt_mac_from_sink(sink_name)
+        card = self._get_bt_card_info_cached(mac) if mac else None
+        if card:
+            active = (card.get('active_profile') or '').strip().lower()
+            if not active:
+                return False, 'card-profile-unknown'
+            if active == 'off':
+                return False, 'card-off'
+            sink_profile = probe.get('profile') if probe else None
+            if sink_profile is not None:
+                sink_profile = sink_profile.strip().lower()
+                if active.startswith('a2dp') and not sink_profile.startswith('a2dp'):
+                    return False, 'profile-mismatch'
+                if active.startswith('headset') and not sink_profile.startswith('headset'):
+                    return False, 'profile-mismatch'
+
+        return True, 'ready'
+
+    def _log_bt_state(self, master_sink: str, state: str, reason: str) -> None:
+        """Log one line per Bluetooth state transition, never per routing pass."""
+        state_key = (state, reason if state != 'ready' else 'ready')
+        if self._bt_state.get(master_sink) == state_key:
+            return
+        self._bt_state[master_sink] = state_key
+
+        if state == 'ready':
+            logger.info("Bluetooth target %s is ready; resuming routing", master_sink)
+        elif state == 'failed':
+            logger.warning(
+                "Bluetooth target %s is connected but not routable (%s) after %.0fs; "
+                "waiting for the transport to recover before retrying",
+                master_sink,
+                self._bt_reason_label(reason),
+                self.BT_TRANSPORT_FAILED_SEC,
+            )
+        else:
+            now = time.monotonic()
+            retry = max(0.1, self._bt_backoff_until.get(master_sink, now) - now)
+            logger.info(
+                "Bluetooth target %s not ready (%s); deferring routing for %.1fs",
+                master_sink,
+                self._bt_reason_label(reason),
+                retry,
+            )
+
+    def _note_bt_not_ready(self, master_sink: str, reason: str) -> float:
+        """Record a not-ready result and return the retry delay."""
+        now = time.monotonic()
+        existing_until = self._bt_backoff_until.get(master_sink)
+        if existing_until is not None and now < existing_until:
+            # A rule and the default-fallback check can both see the same
+            # target in one pass; never grow the backoff twice for that.
+            retry = max(0.1, existing_until - now)
+        elif reason == 'settling':
+            retry = max(0.1, self._bt_settle_until.get(master_sink, now) - now)
+            self._bt_backoff_until[master_sink] = now + retry
+        else:
+            previous = self._bt_backoff_sec.get(master_sink, 0.0)
+            retry = min(
+                max(self.BT_BACKOFF_INITIAL_SEC, previous * 2.0),
+                self.BT_BACKOFF_MAX_SEC,
+            )
+            self._bt_backoff_sec[master_sink] = retry
+            self._bt_backoff_until[master_sink] = now + retry
+
+        since = self._bt_not_ready_since.setdefault(master_sink, now)
+        failed = (
+            reason != 'settling'
+            and (now - since) >= self.BT_TRANSPORT_FAILED_SEC
+        )
+        self._log_bt_state(master_sink, 'failed' if failed else 'waiting', reason)
+        return retry
+
+    def _note_bt_ready(self, master_sink: str) -> None:
+        self._bt_backoff_sec.pop(master_sink, None)
+        self._bt_backoff_until.pop(master_sink, None)
+        self._bt_not_ready_since.pop(master_sink, None)
+        self._log_bt_state(master_sink, 'ready', 'ready')
+
+    def _bt_retry_after(self, targets: List[str]) -> float:
+        """Shortest backoff remaining across the given deferred targets."""
+        now = time.monotonic()
+        waits = []
+        for target in targets:
+            master = self._normalize_master_sink_name(target)
+            until = self._bt_backoff_until.get(master)
+            if until is not None:
+                waits.append(max(0.05, until - now))
+        return min(waits) if waits else 0.25
+
 
     def _normalize_master_sink_name(self, sink_name: str) -> str:
         """Unwrap SinkSwitch mono remap sink names to their physical master sink."""
@@ -386,7 +658,11 @@ class AudioRouterEngine:
         # system default sink (typically analog speakers).
         resolved_master = self._resolve_sink(master_sink, allow_managed_remaps=False)
         if not resolved_master:
-            logger.warning("Cannot create mono remap sink: master %r not found", master_sink)
+            self._log_rate_limited(
+                f"mono-master-missing:{master_sink}",
+                "Cannot create mono remap sink: master %r not found",
+                master_sink,
+            )
             return master_sink
         actual_master_id, actual_master_name = resolved_master
         is_bluetooth_master = 'bluez' in actual_master_name.lower()
@@ -526,8 +802,8 @@ class AudioRouterEngine:
                 time.sleep(0.08)
             return
 
-    def _get_effective_target_sink(self, sink_name: str) -> str:
-        """Return sink name to route to, enabling mono for Bluetooth when configured."""
+    def _get_effective_target_sink(self, sink_name: str) -> Optional[str]:
+        """Return sink name to route to, or None if a Bluetooth target is not ready."""
         if 'bluez' not in (sink_name or '').lower():
             return sink_name
 
@@ -537,8 +813,23 @@ class AudioRouterEngine:
         # transports. Wrapping them in a SinkSwitch mono remap is pointless and a
         # pactl load-module against a profile that is mid-switch can hang and
         # wedge the whole audio server, so never mono-remap a headset profile.
+        # HFP is a legitimate active profile, so it needs no A2DP readiness check.
         if self._is_headset_profile_bluetooth_sink(master_sink):
+            self._note_bt_ready(master_sink)
             return sink_name
+
+        ready, reason = self._evaluate_bt_readiness(master_sink)
+        if not ready:
+            retry = self._note_bt_not_ready(master_sink, reason)
+            logger.debug(
+                "Deferring Bluetooth target %s (%s); retry in %.1fs",
+                master_sink,
+                reason,
+                retry,
+            )
+            return None
+
+        self._note_bt_ready(master_sink)
 
         if self.force_bluetooth_mono:
             mono_sink = self._ensure_mono_remap_sink(master_sink)
@@ -650,35 +941,48 @@ class AudioRouterEngine:
                     'message': 'No target device configured for this rule',
                 }
 
-            # Pick the best currently reachable target for status messaging,
-            # but do not abort routing if resolution is temporarily stale.
-            connected_target = all_targets[0]
-            sink_states = self._get_sink_states()
-            target_probe: List[Tuple[str, str, str, str]] = []
+            # Route only to targets whose Bluetooth transport is actually ready.
+            # A node that exists but has no active A2DP profile is not routable
+            # yet; defer instead of pinning remaps/streams to it.
+            effective_targets: List[str] = []
+            ready_targets: List[str] = []
+            deferred_targets: List[str] = []
             for target in all_targets:
-                resolved = self._resolve_sink(target, allow_managed_remaps=False)
-                if not resolved:
-                    target_probe.append((target, 'missing', '-', '-'))
+                effective = self._get_effective_target_sink(target)
+                if not effective:
+                    deferred_targets.append(target)
                     continue
-                _, sink_name = resolved
-                sink_state = sink_states.get(sink_name, 'UNKNOWN').upper()
-                target_probe.append((target, 'resolved', sink_name, sink_state))
-                if sink_state == 'UNAVAILABLE':
-                    continue
-                connected_target = target
-                break
+                ready_targets.append(target)
+                if effective not in effective_targets:
+                    effective_targets.append(effective)
+
             logger.debug(
-                "Rule %r target resolution: preferred=%r probes=%s connected_choice=%r",
+                "Rule %r target resolution: preferred=%r ready=%s deferred=%s",
                 rule_name,
                 target_device,
-                target_probe,
-                connected_target,
+                ready_targets,
+                deferred_targets,
             )
-            
-            # Route matching applications to target device (try all variants)
-            effective_targets: List[str] = []
-            for target in all_targets:
-                effective_targets.append(self._get_effective_target_sink(target))
+
+            if not effective_targets:
+                reason = 'not ready'
+                for target in deferred_targets:
+                    state = self._bt_state.get(self._normalize_master_sink_name(target))
+                    if state:
+                        reason = state[1]
+                        break
+                return {
+                    'rule_name': rule_name,
+                    'success': True,
+                    'routed_count': 0,
+                    'deferred': True,
+                    'retry_after': self._bt_retry_after(deferred_targets),
+                    'message': (
+                        f"Waiting for Bluetooth transport "
+                        f"({self._bt_reason_label(reason)})"
+                    ),
+                }
+
             routed = self._route_applications(
                 applications,
                 keywords,
@@ -693,6 +997,7 @@ class AudioRouterEngine:
                 keywords,
             )
 
+            connected_target = ready_targets[0] if ready_targets else all_targets[0]
             target_label = connected_target
             for d in self.device_monitor.get_devices():
                 if d.get('id') == connected_target:
@@ -924,6 +1229,29 @@ class AudioRouterEngine:
             }
 
         default_sink_id, default_sink_name_resolved = resolved
+
+        # Never move streams onto a Bluetooth default whose transport has not
+        # opened yet; that would force an early Acquire and make the reconnect
+        # race visible in the audio graph.
+        if 'bluez' in default_sink_name_resolved.lower():
+            master = self._normalize_master_sink_name(default_sink_name_resolved)
+            if not self._is_headset_profile_bluetooth_sink(master):
+                ready, reason = self._evaluate_bt_readiness(master)
+                if not ready:
+                    retry = self._note_bt_not_ready(master, reason)
+                    return {
+                        'rule_name': 'Default fallback',
+                        'success': True,
+                        'routed_count': 0,
+                        'deferred': True,
+                        'retry_after': retry,
+                        'message': (
+                            "Default Bluetooth output not ready "
+                            f"({self._bt_reason_label(reason)}); leaving streams in place"
+                        ),
+                    }
+                self._note_bt_ready(master)
+
         streams = self._get_sink_inputs()
         moved = 0
 
@@ -1111,7 +1439,11 @@ class AudioRouterEngine:
         try:
             resolved = self._resolve_sink(target_device)
             if not resolved:
-                logger.warning("Could not resolve sink for target device %r (not in pactl list sinks)", target_device)
+                self._log_rate_limited(
+                    f"unresolved-target:{target_device}",
+                    "Could not resolve sink for target device %r (not in pactl list sinks)",
+                    target_device,
+                )
                 return False
             target_sink_id, target_sink_name = resolved
             

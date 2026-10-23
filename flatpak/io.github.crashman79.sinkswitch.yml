@@ -26,6 +26,8 @@ finish-args:
   - --talk-name=org.freedesktop.PolicyKit1
   # Login autostart: org.freedesktop.portal.Background (RequestBackground)
   - --talk-name=org.freedesktop.portal.Desktop
+  # Login autostart XDG fallback: write ~/.config/autostart/*.desktop directly
+  - --filesystem=xdg-config/autostart:create
 
 modules:
   # Debian .deb clients: reproducible URLs; host distro (Arch, etc.) does not matter.
@@ -144,9 +146,10 @@ modules:
       - install -Dm644 flatpak/io.github.crashman79.sinkswitch.metainfo.xml ${FLATPAK_DEST}/share/metainfo/io.github.crashman79.sinkswitch.metainfo.xml
       - install -Dm644 data/icons/io.github.crashman79.sinkswitch.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/io.github.crashman79.sinkswitch.svg
       - install -Dm644 data/icons/io.github.crashman79.sinkswitch.png ${FLATPAK_DEST}/share/icons/hicolor/128x128/apps/io.github.crashman79.sinkswitch.png
-      # Compatibility icon name (used by desktop entry): ship an alias so AppStream validation passes.
-      - install -Dm644 data/icons/io.github.crashman79.sinkswitch.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/audio-card.svg
-      - install -Dm644 data/icons/io.github.crashman79.sinkswitch.png ${FLATPAK_DEST}/share/icons/hicolor/128x128/apps/audio-card.png
+      - install -Dm644 data/icons/io.github.crashman79.sinkswitch-symbolic.svg ${FLATPAK_DEST}/share/icons/hicolor/symbolic/apps/io.github.crashman79.sinkswitch-symbolic.svg
+      - install -Dm644 data/icons/NOTICE ${FLATPAK_DEST}/share/licenses/io.github.crashman79.sinkswitch/NOTICE
+      - install -Dm644 data/icons/LICENSE-LGPL-3.0-or-later ${FLATPAK_DEST}/share/licenses/io.github.crashman79.sinkswitch/LICENSE-LGPL-3.0-or-later
+      - install -Dm644 data/icons/LICENSE-LGPL-2.1-only ${FLATPAK_DEST}/share/licenses/io.github.crashman79.sinkswitch/LICENSE-LGPL-2.1-only
     sources:
       - type: dir
         path: ..
