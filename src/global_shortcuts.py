@@ -1,36 +1,45 @@
 """Bluetooth volume control via the Global Shortcuts portal.
 
-SoundCorral redirects Bluetooth audio while the desktop environment keeps
+SinkSwitch redirects Bluetooth audio while the desktop environment keeps
 controlling the main/speaker volume with the plain multimedia keys. This module
 adds a *modifier + volume key* shortcut (e.g. Ctrl+VolumeUp) that adjusts the
 Bluetooth device volume without hijacking the OS keys: the DE still owns the
 unmodified keys.
 
-It uses version 2 of ``org.freedesktop.portal.GlobalShortcuts`` over QtDBus,
-following the same conventions as ``portal_background.py``. All failures degrade
-gracefully: if the portal is unavailable or the user denies the binding, the
-controller reports a status and does nothing else.
+The portal's ``BindShortcuts`` method takes an ``a(sa{sv})`` argument. PyQt6's
+QtDBus cannot marshal that signature from Python, so the portal conversation
+runs on a small worker thread using jeepney, a pure-Python D-Bus client. All
+failures degrade gracefully: if the portal is unavailable or the user denies
+the binding, the controller reports a status and does nothing else.
 """
 from __future__ import annotations
 
 import logging
 import secrets
-from typing import Callable, Dict, List, Optional, Tuple
+import threading
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from PyQt6.QtCore import QObject, pyqtSignal
+
+try:
+    from jeepney import DBusAddress, MatchRule, new_method_call
+    from jeepney.io.blocking import open_dbus_connection
+    _JEEPNEY_AVAILABLE = True
+except ImportError:  # pragma: no cover - depends on packaging
+    DBusAddress = None  # type: ignore[assignment]
+    MatchRule = None  # type: ignore[assignment]
+    new_method_call = None  # type: ignore[assignment]
+    open_dbus_connection = None  # type: ignore[assignment]
+    _JEEPNEY_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
-
-from PyQt6.QtCore import QObject, pyqtSlot
-from PyQt6.QtDBus import (
-    QDBusConnection,
-    QDBusInterface,
-    QDBusMessage,
-    QDBusPendingCallWatcher,
-    QDBusPendingReply,
-)
 
 PORTAL_SERVICE = "org.freedesktop.portal.Desktop"
 PORTAL_PATH = "/org/freedesktop/portal/desktop"
 PORTAL_IFACE = "org.freedesktop.portal.GlobalShortcuts"
+REQUEST_IFACE = "org.freedesktop.portal.Request"
+SESSION_IFACE = "org.freedesktop.portal.Session"
 
 # Application-provided shortcut IDs (stable; shown in the portal dialog).
 SC_VOL_UP = "bt_volume_up"
@@ -44,12 +53,13 @@ _AUDIO_KEYS = {
     SC_MUTE: "XF86AudioMute",
 }
 
-# User-facing modifier -> GTK accelerator prefix understood by the portal.
+# User-facing modifier -> xkbcommon modifier name used by the XDG shortcuts
+# specification (modifiers and keysyms joined with '+').
 MODIFIER_PREFIX = {
-    "Ctrl": "<Ctrl>",
-    "Super": "<Super>",
-    "Alt": "<Alt>",
-    "Win": "<Super>",
+    "Ctrl": "CTRL+",
+    "Super": "LOGO+",
+    "Alt": "ALT+",
+    "Win": "LOGO+",
 }
 
 _DESCRIPTIONS = {
@@ -75,6 +85,17 @@ def _trigger(modifier: str, key: str) -> str:
     return f"{prefix}{key}"
 
 
+def _token(prefix: str = "sw") -> str:
+    return prefix + secrets.token_hex(6)
+
+
+def _variant_value(value: Any) -> Any:
+    """Unwrap jeepney's ``(signature, value)`` variant representation."""
+    if isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], str):
+        return value[1]
+    return value
+
+
 class GlobalShortcutsController(QObject):
     """Bind modifier+volume global shortcuts that drive Bluetooth volume.
 
@@ -83,17 +104,20 @@ class GlobalShortcutsController(QObject):
     action to ``engine.adjust_bluetooth_volume`` / ``engine.toggle_bluetooth_mute``).
     """
 
+    activated = pyqtSignal(str)
+    status_changed = pyqtSignal(str, str)
+
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent)
-        self._bus = QDBusConnection.sessionBus()
-        self._session_handle: Optional[str] = None
-        self._active_request_path: Optional[str] = None
         self._handlers: Dict[str, Callable[[], None]] = {}
-        self._triggers: Dict[str, str] = {}
+        self._status_cb: Optional[Callable[[str, str], None]] = None
         self._available = False
         self._bound_shortcuts: List[Tuple[str, Dict[str, str]]] = []
-        self._activated_connected = False
-        self._status_cb: Optional[Callable[[str, str], None]] = None
+        self._session_handle: Optional[str] = None
+        self._thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self.status_changed.connect(self._on_status_changed)
+        self.activated.connect(self._on_activated_action)
 
     # -- public API -------------------------------------------------------
     def set_status_callback(self, cb: Callable[[str, str], None]) -> None:
@@ -110,241 +134,283 @@ class GlobalShortcutsController(QObject):
         return list(self._bound_shortcuts)
 
     def start(self, handlers: Dict[str, Callable[[], None]], modifier: str = "Ctrl") -> bool:
-        """Create a GlobalShortcuts session and bind the volume shortcuts.
+        """Start a GlobalShortcuts session and bind the volume shortcuts.
 
-        Returns True if the portal call was dispatched (the actual grant arrives
-        later via the status callback). Returns False if the bus or portal is
-        unavailable.
+        Returns True if the worker was started; the actual grant (or denial)
+        arrives later via the status callback.
         """
-        if self._available or self._session_handle or self._active_request_path:
-            # Already active: close the previous session before rebinding.
-            self.stop()
+        self.stop()
 
-        if not self._bus.isConnected():
-            self._report("error", "D-Bus session bus is not connected")
-            return False
-
-        iface = QDBusInterface(PORTAL_SERVICE, PORTAL_PATH, PORTAL_IFACE, self._bus)
-        if not iface.isValid():
-            self._report("error", "GlobalShortcuts portal is not available on this system")
+        if not _JEEPNEY_AVAILABLE:
+            self._report(
+                "error",
+                "Global shortcuts need the 'jeepney' package; install it or use the Flatpak build",
+            )
             return False
 
         self._handlers = dict(handlers)
-        self._triggers = {
-            sid: _trigger(modifier, key) for sid, key in _AUDIO_KEYS.items()
-        }
-
-        app_token = "sw" + secrets.token_hex(6)
-        session_token = "sw" + secrets.token_hex(6)
-        opts = {
-            "handle_token": app_token,
-            "session_handle_token": session_token,
-        }
-
-        msg = QDBusMessage.createMethodCall(
-            PORTAL_SERVICE, PORTAL_PATH, PORTAL_IFACE, "CreateSession"
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(modifier,),
+            name="GlobalShortcuts",
+            daemon=True,
         )
-        msg.setArguments([opts])
-        self._dispatch(msg)
+        self._thread.start()
         return True
 
     def stop(self) -> None:
         """Close the session and release any bound shortcuts."""
-        if self._activated_connected and self._session_handle:
-            try:
-                self._bus.disconnect(
-                    PORTAL_SERVICE,
-                    self._session_handle,
-                    PORTAL_IFACE,
-                    "Activated",
-                    self._on_activated,
-                )
-            except Exception:
-                pass
-            self._activated_connected = False
-        if self._active_request_path:
-            try:
-                self._bus.disconnect(
-                    PORTAL_SERVICE,
-                    self._active_request_path,
-                    "org.freedesktop.portal.Request",
-                    "Response",
-                    self._on_response,
-                )
-            except Exception:
-                pass
-            self._active_request_path = None
-        if self._session_handle:
-            try:
-                iface = QDBusInterface(
-                    PORTAL_SERVICE,
-                    self._session_handle,
-                    "org.freedesktop.portal.Session",
-                    self._bus,
-                )
-                iface.call("Close")
-            except Exception:
-                logger.debug("Failed to close GlobalShortcuts session", exc_info=True)
-        self._session_handle = None
+        self._stop_event.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3.0)
+        self._thread = None
         self._available = False
         self._bound_shortcuts = []
 
-    # -- internals --------------------------------------------------------
-    def _report(self, level: str, message: str) -> None:
-        logger.info("GlobalShortcuts %s: %s", level, message)
-        if self._status_cb:
-            try:
-                self._status_cb(level, message)
-            except Exception:
-                pass
-
-    def _dispatch(self, msg: QDBusMessage) -> None:
-        """asyncCall and watch for completion; connect Request.Response on the
-        returned request handle so the actual result (session/shortcuts) arrives
-        via :meth:`_on_response`."""
-        pending = self._bus.asyncCall(msg)
-        watcher = QDBusPendingCallWatcher(pending)
-        watcher.finished.connect(lambda _w=watcher: self._on_pending(watcher))
-
-    def _on_pending(self, watcher: QDBusPendingCallWatcher) -> None:
-        watcher.deleteLater()
-        pr = QDBusPendingReply(watcher)
-        if not pr.isFinished():
-            self._report("error", "Portal call did not complete")
-            return
-        if pr.isError():
-            self._report("error", f"Portal call failed: {pr.error().message()}")
-            return
-        reply = pr.reply()
-        if reply.type() != QDBusMessage.MessageType.ReplyMessage:
-            self._report("error", "Portal returned no reply")
-            return
-        args = reply.arguments()
-        if not args:
-            self._report("error", "Portal returned an empty reply")
-            return
-        h = args[0]
-        path = h.path() if hasattr(h, "path") else str(h)
-        self._active_request_path = path
-        if not self._bus.connect(
-            PORTAL_SERVICE,
-            path,
-            "org.freedesktop.portal.Request",
-            "Response",
-            self._on_response,
-        ):
-            self._report("error", "Could not listen for portal response")
-
-    @pyqtSlot(QDBusMessage)
-    def _on_response(self, message: QDBusMessage) -> None:
-        # A portal Request is one-shot; drop its Response connection now.
-        old = self._active_request_path
-        self._active_request_path = None
-        if old:
-            try:
-                self._bus.disconnect(
-                    PORTAL_SERVICE,
-                    old,
-                    "org.freedesktop.portal.Request",
-                    "Response",
-                    self._on_response,
-                )
-            except Exception:
-                pass
-
-        args = message.arguments()
-        if len(args) < 2:
+    # -- Qt-thread dispatch ----------------------------------------------
+    def _on_status_changed(self, level: str, message: str) -> None:
+        cb = self._status_cb
+        if cb is None:
             return
         try:
-            response_code = int(args[0])
-        except (TypeError, ValueError):
-            return
-        results = args[1] if isinstance(args[1], dict) else {}
+            cb(level, message)
+        except Exception:
+            logger.debug("GlobalShortcuts status callback failed", exc_info=True)
 
-        if response_code != 0:
-            self._report("warn", "Shortcut binding cancelled or denied by the system")
-            return
-
-        if "session_handle" in results:
-            self._on_create_response(results)
-        elif "shortcuts" in results:
-            self._on_bind_response(results)
-
-    def _on_create_response(self, results: Dict) -> None:
-        handle = results.get("session_handle")
-        if not handle:
-            self._report("error", "Portal did not return a session handle")
-            return
-        self._session_handle = str(handle)
-        if not self._bus.connect(
-            PORTAL_SERVICE,
-            self._session_handle,
-            PORTAL_IFACE,
-            "Activated",
-            self._on_activated,
-        ):
-            self._report("error", "Could not listen for shortcut activations")
-            return
-        self._activated_connected = True
-        self._bind()
-
-    def _bind(self) -> None:
-        if not self._session_handle:
-            return
-        shortcuts = [
-            (
-                sid,
-                {
-                    "description": _DESCRIPTIONS[sid],
-                    "preferred_trigger": self._triggers.get(sid, ""),
-                },
-            )
-            for sid in (SC_VOL_UP, SC_VOL_DOWN, SC_MUTE)
-        ]
-        bind_token = "sw" + secrets.token_hex(6)
-        opts = {"handle_token": bind_token}
-        msg = QDBusMessage.createMethodCall(
-            PORTAL_SERVICE, PORTAL_PATH, PORTAL_IFACE, "BindShortcuts"
-        )
-        # BindShortcuts(o session_handle, a(sa{sv}) shortcuts, s parent_window, a{sv} options)
-        msg.setArguments([self._session_handle, shortcuts, "", opts])
-        self._dispatch(msg)
-
-    def _on_bind_response(self, results: Dict) -> None:
-        self._bound_shortcuts = results.get("shortcuts", []) or []
-        if self._bound_shortcuts:
-            self._available = True
-            labels = [
-                self._shortcut_label(s) for s in self._bound_shortcuts
-            ]
-            self._report(
-                "ok",
-                "Bluetooth volume shortcuts active: " + ", ".join(labels),
-            )
-        else:
-            self._report(
-                "warn",
-                "Portal bound no shortcuts; check your desktop keybinding settings",
-            )
-
-    @staticmethod
-    def _shortcut_label(entry) -> str:
-        if isinstance(entry, (list, tuple)) and len(entry) > 1 and isinstance(entry[1], dict):
-            return entry[1].get("trigger_description", entry[0])
-        return str(entry)
-
-    @pyqtSlot(QDBusMessage)
-    def _on_activated(self, message: QDBusMessage) -> None:
-        args = message.arguments()
-        # Activated(o session_handle, s shortcut_id, t timestamp, a{sv} options)
-        if len(args) < 2:
-            return
-        shortcut_id = str(args[1])
-        action = _SHORTCUT_TO_ACTION.get(shortcut_id)
-        handler = self._handlers.get(action) if action else None
+    def _on_activated_action(self, action: str) -> None:
+        handler = self._handlers.get(action)
         if handler is None:
             return
         try:
             handler()
         except Exception:
             logger.exception("Bluetooth volume shortcut handler failed")
+
+    def _report(self, level: str, message: str) -> None:
+        logger.info("GlobalShortcuts %s: %s", level, message)
+        self.status_changed.emit(level, message)
+
+    # -- worker -----------------------------------------------------------
+    def _run(self, modifier: str) -> None:
+        conn = None
+        session = None
+        try:
+            conn = open_dbus_connection(bus="SESSION")
+            self._report("warn", "Requesting Bluetooth volume shortcuts...")
+            session = self._create_session(conn)
+            if not session:
+                return
+            self._session_handle = session
+            if not self._bind(conn, session, modifier):
+                return
+            self._available = True
+            self._listen(conn, session)
+        except Exception as e:
+            logger.exception("GlobalShortcuts worker failed")
+            self._report("error", f"Global shortcuts failed: {e}")
+        finally:
+            self._available = False
+            self._session_handle = None
+            if conn is not None:
+                if session:
+                    self._close_session(conn, session)
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def _create_session(self, conn) -> Optional[str]:
+        options = {
+            "handle_token": ("s", _token()),
+            "session_handle_token": ("s", _token()),
+        }
+        reply = conn.send_and_get_reply(
+            new_method_call(
+                DBusAddress(
+                    PORTAL_PATH,
+                    bus_name=PORTAL_SERVICE,
+                    interface=PORTAL_IFACE,
+                ),
+                "CreateSession",
+                "a{sv}",
+                (options,),
+            )
+        )
+        request_path = reply.body[0]
+        message = self._wait_for_response(conn, request_path, timeout=15.0)
+        if message is None:
+            self._report("error", "Portal did not answer the shortcut session request")
+            return None
+        code, results = self._response_parts(message)
+        if code != 0:
+            self._report("warn", "Shortcut session cancelled or denied by the system")
+            return None
+        session = _variant_value(results.get("session_handle"))
+        if not session:
+            self._report("error", "Portal did not return a shortcut session")
+            return None
+        return str(session)
+
+    def _bind(self, conn, session: str, modifier: str) -> bool:
+        shortcuts = [
+            (
+                sid,
+                {
+                    "description": ("s", _DESCRIPTIONS[sid]),
+                    "preferred_trigger": (
+                        "s",
+                        _trigger(modifier, _AUDIO_KEYS[sid]),
+                    ),
+                },
+            )
+            for sid in (SC_VOL_UP, SC_VOL_DOWN, SC_MUTE)
+        ]
+        options = {"handle_token": ("s", _token())}
+        reply = conn.send_and_get_reply(
+            new_method_call(
+                DBusAddress(
+                    PORTAL_PATH,
+                    bus_name=PORTAL_SERVICE,
+                    interface=PORTAL_IFACE,
+                ),
+                "BindShortcuts",
+                "oa(sa{sv})sa{sv}",
+                (session, shortcuts, "", options),
+            )
+        )
+        request_path = reply.body[0]
+        message = self._wait_for_response(conn, request_path, timeout=120.0)
+        if message is None:
+            self._report("warn", "Shortcut binding timed out; check desktop permissions")
+            return False
+        code, results = self._response_parts(message)
+        if code != 0:
+            self._report("warn", "Shortcut binding cancelled or denied by the system")
+            return False
+        bound = _variant_value(results.get("shortcuts")) or []
+        self._bound_shortcuts = list(bound)
+        if not bound:
+            self._report(
+                "warn",
+                "Portal bound no shortcuts; check your desktop keybinding settings",
+            )
+            return False
+
+        assigned: List[str] = []
+        unassigned: List[str] = []
+        for entry in bound:
+            props = entry[1] if isinstance(entry, (list, tuple)) and len(entry) > 1 else {}
+            trigger = _variant_value(props.get("trigger_description")) if isinstance(props, dict) else ""
+            description = (
+                _variant_value(props.get("description")) if isinstance(props, dict) else ""
+            )
+            label = str(description or entry[0])
+            if trigger:
+                assigned.append(f"{label} ({trigger})")
+            else:
+                unassigned.append(label)
+
+        if assigned:
+            message = "Bluetooth volume shortcuts active: " + ", ".join(assigned)
+            if unassigned:
+                message += (
+                    ". Not assigned: "
+                    + ", ".join(unassigned)
+                    + " — open System Settings → Shortcuts to assign them"
+                )
+            self._report("ok", message)
+        else:
+            self._report(
+                "warn",
+                "Shortcuts registered but no keys assigned. Open System Settings → "
+                "Shortcuts and assign the SoundCorral Bluetooth volume shortcuts.",
+            )
+        return True
+
+    def _listen(self, conn, session: str) -> None:
+        rule = MatchRule(
+            type="signal",
+            interface=PORTAL_IFACE,
+            member="Activated",
+            path=session,
+        )
+        with conn.filter(rule) as queue:
+            while not self._stop_event.is_set():
+                try:
+                    message = conn.recv_until_filtered(queue, timeout=1.0)
+                except TimeoutError:
+                    continue
+                except Exception:
+                    logger.debug("GlobalShortcuts listener stopped", exc_info=True)
+                    return
+                args = message.body
+                if len(args) < 2:
+                    continue
+                shortcut_id = _variant_value(args[1])
+                action = _SHORTCUT_TO_ACTION.get(str(shortcut_id))
+                if action:
+                    self.activated.emit(action)
+
+    def _wait_for_response(self, conn, request_path: str, timeout: float):
+        rule = MatchRule(
+            type="signal",
+            interface=REQUEST_IFACE,
+            member="Response",
+            path=request_path,
+        )
+        deadline = time.monotonic() + max(0.1, timeout)
+        with conn.filter(rule) as queue:
+            while not self._stop_event.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                try:
+                    return conn.recv_until_filtered(queue, timeout=min(1.0, remaining))
+                except TimeoutError:
+                    continue
+        return None
+
+    @staticmethod
+    def _response_parts(message) -> Tuple[int, Dict[str, Any]]:
+        args = message.body
+        if not isinstance(args, (list, tuple)) or len(args) < 2:
+            return -1, {}
+        try:
+            code = int(args[0])
+        except (TypeError, ValueError):
+            code = -1
+        results = args[1] if isinstance(args[1], dict) else {}
+        return code, results
+
+    @staticmethod
+    def _shortcut_label(entry: Any) -> str:
+        if isinstance(entry, (list, tuple)) and len(entry) > 1 and isinstance(entry[1], dict):
+            props = entry[1]
+            label = (
+                _variant_value(props.get("trigger_description"))
+                or _variant_value(props.get("description"))
+                or entry[0]
+            )
+            return str(label)
+        return str(_variant_value(entry))
+
+    @staticmethod
+    def _close_session(conn, session: str) -> None:
+        try:
+            conn.send_and_get_reply(
+                new_method_call(
+                    DBusAddress(
+                        session,
+                        bus_name=PORTAL_SERVICE,
+                        interface=SESSION_IFACE,
+                    ),
+                    "Close",
+                    "",
+                    (),
+                ),
+                timeout=2.0,
+            )
+        except Exception:
+            pass

@@ -121,7 +121,9 @@ If your desktop provides a system tray, SoundCorral adds an icon with **Show**, 
 | Use a modifier + volume keys to control the Bluetooth device | On | Enables the optional modifier + volume shortcut described below. |
 | Modifier key | Ctrl | The modifier used with Volume Up, Volume Down, and Mute (Ctrl, Super, or Alt). |
 
-The **Bluetooth volume shortcuts** option lets you control only the Bluetooth output with a modifier plus the normal volume keys, for example Ctrl + Volume Up. Plain volume keys still control your speakers through your desktop as usual. This uses the desktop's Global Shortcuts portal. On the first use your desktop may ask for permission; if the shortcut cannot be registered, the rest of the app still works normally.
+The **Bluetooth volume shortcuts** option lets you control only the Bluetooth output with a modifier plus the normal volume keys, for example Ctrl + Volume Up. Plain volume keys still control your speakers through your desktop as usual. This uses the desktop's Global Shortcuts portal.
+
+The first time you enable it, your desktop may show a shortcut permission/configuration dialog. Accept it to bind the three shortcuts. If your desktop does not assign the keys automatically, open **System Settings → Shortcuts**, find SoundCorral, and assign the Bluetooth volume shortcuts there. The status line under the setting tells you whether the keys are active or still need to be assigned. If the portal is unavailable or you deny the request, the rest of the app still works normally.
 
 ## Rules file
 
@@ -157,7 +159,7 @@ The target device is the internal device name shown in the Devices table.
 - **One Bluetooth target at a time.** All Bluetooth-routed apps share the single managed Bluetooth output.
 - **Stopping does not undo routes.** Already-playing streams stay on their current output; only new streams return to the system default until you start the router again.
 - **Temporary routes are temporary.** They are cleared when the router stops or restarts.
-- **The Bluetooth volume shortcut needs desktop support** for the Global Shortcuts portal. If your desktop does not provide it, the shortcut simply will not bind.
+- **The Bluetooth volume shortcut needs desktop support** for the Global Shortcuts portal. If your desktop does not provide it, the shortcut will not bind. If your desktop does support it but does not assign the keys automatically, use **System Settings → Shortcuts** to assign them.
 - **Hand-edited rules are read when the app loads them**, so save and restart the router after changing the file while the app is open.
 - **SoundCorral does not record, process, or upload audio.** It only moves streams between outputs.
 - **Update checks only work in the packaged build**, not when running from source.

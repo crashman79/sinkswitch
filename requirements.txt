@@ -4,6 +4,10 @@ certifi>=2023.0.0
 # PyQt6 is the GUI/tray toolkit (proper Wayland support) and provides QtDBus
 # for portal integration. It is bundled into the Flatpak via the pinned wheels
 # in flatpak/*.yml, so it is listed here only for non-Flatpak local installs.
-# NOTE: D-Bus access uses PyQt6.QtDBus -- the legacy dbus-python binding is NOT
-# used anywhere and must not be reintroduced.
 PyQt6>=6.0
+
+# The GlobalShortcuts portal takes an a(sa{sv}) argument that PyQt6's QtDBus
+# cannot marshal from Python, so that one portal conversation runs on a worker
+# thread using jeepney (pure Python). The legacy dbus-python binding is still
+# not used.
+jeepney>=0.9.0
