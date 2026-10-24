@@ -198,7 +198,10 @@ class GlobalShortcutsController(QObject):
         session = None
         try:
             conn = open_dbus_connection(bus="SESSION")
-            self._report("warn", "Requesting Bluetooth volume shortcuts...")
+            self._report(
+                "warn",
+                "Approve the desktop's shortcut dialog to bind Bluetooth volume shortcuts...",
+            )
             session = self._create_session(conn)
             if not session:
                 return
@@ -281,9 +284,13 @@ class GlobalShortcutsController(QObject):
             )
         )
         request_path = reply.body[0]
-        message = self._wait_for_response(conn, request_path, timeout=120.0)
+        message = self._wait_for_response(conn, request_path, timeout=600.0)
         if message is None:
-            self._report("warn", "Shortcut binding timed out; check desktop permissions")
+            self._report(
+                "warn",
+                "No response from the shortcut dialog. Apply again, or assign the "
+                "Bluetooth volume shortcuts in System Settings → Shortcuts.",
+            )
             return False
         code, results = self._response_parts(message)
         if code != 0:
