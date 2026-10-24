@@ -9,12 +9,15 @@ SUBPROCESS_TEXT_KW: Dict[str, str] = {"encoding": "utf-8", "errors": "replace"}
 
 # In Flatpak, read-only pactl (list, subscribe, get-default-sink, …) must stay
 # in the sandbox: it sees the same graph as the proxy. Running *all* pactl on
-# the host after unsetting PULSE_* often yields empty device lists.
+# the host after unsetting PULSE_* often yields empty device lists. Mutating
+# subcommands return "Access denied" in-sandbox, so they run on the host.
 _PACTL_HOST_SUBCOMMANDS = frozenset(
     {
         "move-sink-input",
         "set-default-sink",
         "set-card-profile",
+        "set-sink-volume",
+        "set-sink-mute",
         "load-module",
         "unload-module",
     }

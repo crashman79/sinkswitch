@@ -167,53 +167,195 @@ try:
     from audio_router_engine import AudioRouterEngine
     from intelligent_audio_router import IntelligentAudioRouter
     from portal_background import request_flatpak_login_autostart
+    from global_shortcuts import (
+        GlobalShortcutsController,
+        ACTION_VOLUME_UP,
+        ACTION_VOLUME_DOWN,
+        ACTION_MUTE,
+    )
 
 except ImportError as e:
     logger.error(f"Failed to import audio router modules: {e}")
     sys.exit(1)
 
 
-class DeviceUpdateThread(QThread):
-    """Background thread for updating device list"""
-    devices_updated = pyqtSignal(list)
-    
+class _EventDrivenRefreshThread(QThread):
+    """Base for GUI refresh threads that should NOT churn when nothing changes.
+
+    Driven by ``pactl subscribe`` events (the same mechanism the routing engine
+    uses): we re-fetch and emit only when a relevant audio event arrives, and we
+    dedupe so the UI is re-rendered only when the parsed data actually differs.
+    A slow deduped poll runs as a safety net (and as the fallback when
+    ``pactl subscribe`` is unavailable); it never re-renders on unchanged data.
+    """
+    # Subclasses set this to the name of their concrete pyqtSignal.
+    _SIGNAL_ATTR: str = "data_updated"
+    # pactl subscribe facility keywords that should trigger a refresh.
+    _EVENT_KEYWORDS: Tuple[str, ...] = ()
+    # Safety-net / fallback poll period (seconds).
+    _POLL_INTERVAL_SEC: float = 30.0
+    # Debounce after an event before re-fetching (lets bursts settle).
+    _DEBOUNCE_SEC: float = 0.2
+
     def __init__(self):
         super().__init__()
         self.running = True
-    
-    def run(self):
-        while self.running:
+        self._last_sig: Optional[str] = None
+
+    def _fetch(self) -> List[Dict]:
+        raise NotImplementedError
+
+    def _signature(self, data: List[Dict]) -> str:
+        try:
+            base = json.dumps(data, sort_keys=True, default=str)
+        except Exception:
+            base = repr(data)
+        # Fold in any extra context that affects how the data is displayed but is
+        # not part of the parsed payload itself (e.g. the default sink).
+        return base + "|" + self._context_key()
+
+    def _context_key(self) -> str:
+        """Extra context folded into the change signature (override as needed)."""
+        return ""
+
+    def _emit_if_changed(self, data: List[Dict]) -> None:
+        sig = self._signature(data)
+        if sig == self._last_sig:
+            return
+        self._last_sig = sig
+        getattr(self, self._SIGNAL_ATTR).emit(data)
+
+    def run(self) -> None:
+        self._last_sig = None
+        try:
+            self._emit_if_changed(self._fetch())
+        except Exception as e:
+            logger.error("%s initial fetch failed: %s", self.__class__.__name__, e)
+        if self._run_event_loop():
+            return
+        self._run_poll_loop()
+
+    def _run_event_loop(self) -> bool:
+        """Event-driven loop via pactl subscribe. Returns True if it ran."""
+        try:
+            proc = subprocess.Popen(
+                host_cmd(['pactl', 'subscribe']),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                **SUBPROCESS_TEXT_KW,
+                bufsize=1,
+            )
+        except (FileNotFoundError, OSError) as e:
+            logger.debug("pactl subscribe unavailable for %s: %s", self.__class__.__name__, e)
+            return False
+
+        event = threading.Event()
+
+        def _reader():
             try:
-                monitor = DeviceMonitor()
-                devices = monitor.get_devices()
-                self.devices_updated.emit(devices)
-            except Exception as e:
-                logger.error(f"Error updating devices: {e}")
-            
-            self.msleep(3000)  # Update every 3 seconds
-    
-    def stop(self):
+                for line in proc.stdout:
+                    if not self.running:
+                        break
+                    low = (line or '').strip().lower()
+                    if not low:
+                        continue
+                    if any(k in low for k in self._EVENT_KEYWORDS):
+                        event.set()
+            except Exception:
+                pass
+            finally:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
+        reader = threading.Thread(target=_reader, daemon=True)
+        reader.start()
+        last_poll = time.time()
+        try:
+            while self.running:
+                if proc.poll() is not None:
+                    logger.info(
+                        "pactl subscribe exited for %s; falling back to polling",
+                        self.__class__.__name__,
+                    )
+                    return False
+                triggered = event.wait(timeout=1.0)
+                if not self.running:
+                    break
+                if triggered:
+                    event.clear()
+                    time.sleep(self._DEBOUNCE_SEC)
+                    if not self.running:
+                        break
+                    self._refresh()
+                    last_poll = time.time()
+                else:
+                    now = time.time()
+                    if now - last_poll >= self._POLL_INTERVAL_SEC:
+                        last_poll = now
+                        self._refresh()
+        finally:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:
+                pass
+        return True
+
+    def _refresh(self) -> None:
+        try:
+            self._emit_if_changed(self._fetch())
+        except Exception as e:
+            logger.error("%s refresh failed: %s", self.__class__.__name__, e)
+
+    def _run_poll_loop(self) -> None:
+        while self.running:
+            self._refresh()
+            for _ in range(int(self._POLL_INTERVAL_SEC)):
+                if not self.running:
+                    return
+                time.sleep(1)
+
+    def stop(self) -> None:
         self.running = False
 
 
-class StreamMonitorThread(QThread):
-    """Background thread for monitoring active audio streams"""
+class DeviceUpdateThread(_EventDrivenRefreshThread):
+    """Background thread for updating the device list (event-driven)."""
+    devices_updated = pyqtSignal(list)
+    _SIGNAL_ATTR = "devices_updated"
+    _EVENT_KEYWORDS = ("sink", "card", "source", "server")
+    _POLL_INTERVAL_SEC = 30.0
+
+    def _fetch(self) -> List[Dict]:
+        return DeviceMonitor().get_devices()
+
+    def _context_key(self) -> str:
+        # The default-sink combo is refreshed from this thread too, so a default
+        # sink change (a 'server' event) must still trigger a re-render.
+        return DeviceMonitor().get_default_sink() or ""
+
+
+class StreamMonitorThread(_EventDrivenRefreshThread):
+    """Background thread for monitoring active audio streams (event-driven)."""
     streams_updated = pyqtSignal(list)
-    
-    def __init__(self):
-        super().__init__()
-        self.running = True
-    
-    def run(self):
-        while self.running:
-            try:
-                streams = self._get_active_streams()
-                self.streams_updated.emit(streams)
-            except Exception as e:
-                logger.error(f"Error monitoring streams: {e}")
-            
-            self.msleep(2000)  # Update every 2 seconds
-    
+    _SIGNAL_ATTR = "streams_updated"
+    # sink-input: streams appear/move/close; server: default sink change;
+    # card: bluetooth/USB device connect/disconnect. We avoid raw 'sink'
+    # events so dragging the main volume does not spam re-fetches.
+    _EVENT_KEYWORDS = ("sink-input", "server", "card")
+    _POLL_INTERVAL_SEC = 30.0
+
+    def _fetch(self) -> List[Dict]:
+        return self._get_active_streams()
+
+    def _context_key(self) -> str:
+        # The per-stream route column depends on the current default sink, so a
+        # default sink change ('server' event) must refresh the streams table.
+        return DeviceMonitor().get_default_sink() or ""
+
     def _get_active_streams(self) -> List[Dict]:
         """Get list of active audio streams (pactl: colon and key=value props)."""
         try:
@@ -253,9 +395,6 @@ class StreamMonitorThread(QThread):
         except Exception as e:
             logger.error(f"Error getting streams: {e}")
             return []
-    
-    def stop(self):
-        self.running = False
 
 
 class MonitorThread(QThread):
@@ -553,6 +692,8 @@ def _load_app_settings() -> Dict[str, Any]:
         "force_bluetooth_mono": bool,
         "theme": str,
         "devices_streams_split_pct": int,
+        "volume_shortcuts_enabled": bool,
+        "volume_shortcut_modifier": str,
     }
     s = QSettings("io.github.crashman79", "sinkswitch")
     out: Dict[str, Any] = {}
@@ -602,6 +743,8 @@ def _save_app_settings(data: Dict[str, Any]) -> None:
         "force_bluetooth_mono",
         "theme",
         "devices_streams_split_pct",
+        "volume_shortcuts_enabled",
+        "volume_shortcut_modifier",
     }
     s = QSettings("io.github.crashman79", "sinkswitch")
     s.beginGroup("prefs")
@@ -1045,6 +1188,9 @@ class AudioRouterGUI(QMainWindow):
         self.theme_setting = settings.get('theme', 'system')
         self.devices_streams_split_pct = int(settings.get('devices_streams_split_pct', 50) or 50)
         self.devices_streams_split_pct = max(20, min(80, self.devices_streams_split_pct))
+        self.volume_shortcuts_enabled = settings.get('volume_shortcuts_enabled', True)
+        self.volume_shortcut_modifier = settings.get('volume_shortcut_modifier', 'Ctrl')
+        self._volume_engine: Optional['AudioRouterEngine'] = None
         self._status_icon_cache: Dict[str, QIcon] = {}
         self._device_type_icon_cache: Dict[str, QIcon] = {}
         self.monitor_thread: Optional[MonitorThread] = None
@@ -1059,6 +1205,13 @@ class AudioRouterGUI(QMainWindow):
         self.load_config()
         self.start_background_updates()
         self.update_service_status()
+
+        # Bluetooth volume shortcuts: a modifier + volume key adjusts the BT
+        # device while the DE keeps the plain keys for the main output.
+        self.volume_shortcuts_controller = GlobalShortcutsController(parent=self)
+        self.volume_shortcuts_controller.set_status_callback(self._on_volume_shortcuts_status)
+        self._apply_volume_shortcuts()
+
         if self.start_routing_on_launch and self.config_file.exists():
             self._start_in_app_monitor()
 
@@ -1595,6 +1748,40 @@ class AudioRouterGUI(QMainWindow):
         )
         left_col.addWidget(self.auto_mono_single_channel_bluetooth_check)
 
+        # Bluetooth volume shortcuts (Global Shortcuts portal)
+        vol_group = QGroupBox("Bluetooth volume shortcuts")
+        vol_layout = QVBoxLayout()
+        self.volume_shortcuts_check = QCheckBox(
+            "Use a modifier + volume keys to control the Bluetooth device"
+        )
+        self.volume_shortcuts_check.setChecked(self.volume_shortcuts_enabled)
+        self.volume_shortcuts_check.setToolTip(
+            "Plain volume keys still control your main/speaker output (handled by the "
+            "desktop). Hold the chosen modifier with Volume Up/Down/Mute to adjust the "
+            "Bluetooth device instead."
+        )
+        vol_layout.addWidget(self.volume_shortcuts_check)
+
+        mod_row = QHBoxLayout()
+        mod_row.addWidget(QLabel("Modifier key:"))
+        self.volume_shortcut_modifier_combo = QComboBox()
+        self.volume_shortcut_modifier_combo.addItems(["Ctrl", "Super", "Alt"])
+        idx = {"Ctrl": 0, "Super": 1, "Alt": 2}.get(self.volume_shortcut_modifier, 0)
+        self.volume_shortcut_modifier_combo.setCurrentIndex(idx)
+        self.volume_shortcut_modifier_combo.setEnabled(self.volume_shortcuts_enabled)
+        self.volume_shortcuts_check.toggled.connect(
+            self.volume_shortcut_modifier_combo.setEnabled
+        )
+        mod_row.addWidget(self.volume_shortcut_modifier_combo)
+        mod_row.addStretch()
+        vol_layout.addLayout(mod_row)
+
+        self.volume_shortcuts_status_label = QLabel("")
+        self.volume_shortcuts_status_label.setWordWrap(True)
+        vol_layout.addWidget(self.volume_shortcuts_status_label)
+        vol_group.setLayout(vol_layout)
+        left_col.addWidget(vol_group)
+
         btn_row = QHBoxLayout()
         apply_btn = QPushButton("Apply and save")
         apply_btn.setMaximumWidth(140)
@@ -1761,6 +1948,8 @@ class AudioRouterGUI(QMainWindow):
         start_routing = self.start_routing_check.isChecked()
         close_to_tray = self.close_to_tray_check.isChecked()
         auto_mono_single_channel_bluetooth = self.auto_mono_single_channel_bluetooth_check.isChecked()
+        volume_shortcuts_enabled = self.volume_shortcuts_check.isChecked()
+        volume_shortcut_modifier = self.volume_shortcut_modifier_combo.currentText()
         theme_map = {0: "system", 1: "light", 2: "dark"}
         theme = theme_map.get(self.theme_combo.currentIndex(), "system")
         mono_changed = auto_mono_single_channel_bluetooth != self.auto_mono_single_channel_bluetooth
@@ -1769,6 +1958,8 @@ class AudioRouterGUI(QMainWindow):
         self.start_routing_on_launch = start_routing
         self.close_to_tray = close_to_tray
         self.auto_mono_single_channel_bluetooth = auto_mono_single_channel_bluetooth
+        self.volume_shortcuts_enabled = volume_shortcuts_enabled
+        self.volume_shortcut_modifier = volume_shortcut_modifier
         self.theme_setting = theme
         _save_app_settings({
             **_load_app_settings(),
@@ -1779,12 +1970,15 @@ class AudioRouterGUI(QMainWindow):
             'auto_mono_single_channel_bluetooth': auto_mono_single_channel_bluetooth,
             'force_bluetooth_mono': self.force_bluetooth_mono,
             'theme': theme,
+            'volume_shortcuts_enabled': volume_shortcuts_enabled,
+            'volume_shortcut_modifier': volume_shortcut_modifier,
         })
         # Defer palette apply to next event loop to avoid re-entrancy crash in Qt
         app = QApplication.instance()
         if app:
             QTimer.singleShot(0, lambda: _apply_theme(app, theme))
         self.update_service_status()
+        self._apply_volume_shortcuts()
 
         pair = (login_autostart, start_minimized_at_login)
         if os.environ.get("FLATPAK_ID"):
@@ -1822,21 +2016,103 @@ class AudioRouterGUI(QMainWindow):
             self.statusBar().showMessage("Mono routing preference updated; router restarted", 3000)
 
     def _is_internal_remap_sink_id(self, sink_id: str) -> bool:
-        return (sink_id or '').startswith('sinkswitch_mono.')
+        return (sink_id or '').lower().startswith('sinkswitch_')
 
-    def _normalize_mono_master_sink(self, sink_name: str) -> str:
-        out = sink_name or ''
-        while out.startswith('sinkswitch_mono.'):
-            out = out[len('sinkswitch_mono.'):]
-        return out
+    def _live_engine(self) -> Optional['AudioRouterEngine']:
+        """Return the engine owned by the running monitor thread, if any.
+
+        The GUI does not hold its own engine; the routing engine lives on the
+        MonitorThread while routing is active. Volume shortcuts fall back to a
+        lazily-created standalone engine (see ``_get_bt_volume_engine``).
+        """
+        mt = getattr(self, "monitor_thread", None)
+        if mt is not None and mt.isRunning():
+            eng = getattr(mt, "engine", None)
+            if eng is not None:
+                return eng
+        return None
+
+    def _get_managed_sink_state(self) -> Optional[Dict]:
+        """Return the engine's current managed-sink descriptor, or None."""
+        engine = self._live_engine()
+        if engine is None or not hasattr(engine, 'get_managed_sink_state'):
+            return None
+        try:
+            return engine.get_managed_sink_state()
+        except Exception:
+            return None
+
+    # -- Bluetooth volume shortcuts (Global Shortcuts portal) ----------------
+    def _get_bt_volume_engine(self) -> Optional['AudioRouterEngine']:
+        """Return the active routing engine, or a lazily-created standalone one.
+
+        Volume control only needs the engine's ``adjust_bluetooth_volume`` /
+        ``toggle_bluetooth_mute`` helpers, which resolve the Bluetooth sink via a
+        DeviceMonitor and call pactl directly -- they do not require the in-app
+        monitor to be running. This keeps the shortcuts usable even when routing
+        is paused, and avoids creating a second engine when one already exists.
+        """
+        live = self._live_engine()
+        if live is not None:
+            return live
+        if self._volume_engine is None:
+            try:
+                self._volume_engine = AudioRouterEngine(
+                    auto_mono_single_channel_bluetooth=self.auto_mono_single_channel_bluetooth,
+                    force_bluetooth_mono=self.force_bluetooth_mono,
+                )
+            except Exception:
+                logger.exception("Failed to create Bluetooth volume engine")
+                return None
+        return self._volume_engine
+
+    def _on_bt_volume_action(self, action: str) -> None:
+        engine = self._get_bt_volume_engine()
+        if engine is None:
+            self.statusBar().showMessage(
+                "Start routing to enable Bluetooth volume shortcuts", 4000
+            )
+            return
+        if action == ACTION_VOLUME_UP:
+            engine.adjust_bluetooth_volume("+5%")
+        elif action == ACTION_VOLUME_DOWN:
+            engine.adjust_bluetooth_volume("-5%")
+        elif action == ACTION_MUTE:
+            engine.toggle_bluetooth_mute()
+
+    def _apply_volume_shortcuts(self) -> None:
+        """Start or stop the Global Shortcuts binding per the current setting."""
+        ctrl = getattr(self, "volume_shortcuts_controller", None)
+        if ctrl is None:
+            return
+        if not self.volume_shortcuts_enabled:
+            ctrl.stop()
+            self._on_volume_shortcuts_status("warn", "Bluetooth volume shortcuts disabled")
+            return
+        ctrl.start(
+            handlers={
+                ACTION_VOLUME_UP: lambda: self._on_bt_volume_action(ACTION_VOLUME_UP),
+                ACTION_VOLUME_DOWN: lambda: self._on_bt_volume_action(ACTION_VOLUME_DOWN),
+                ACTION_MUTE: lambda: self._on_bt_volume_action(ACTION_MUTE),
+            },
+            modifier=self.volume_shortcut_modifier,
+        )
+
+    def _on_volume_shortcuts_status(self, level: str, message: str) -> None:
+        label = getattr(self, "volume_shortcuts_status_label", None)
+        if label is not None:
+            color = {"ok": "#2e7d32", "warn": "#b26a00", "error": "#c62828"}.get(level, "#444")
+            label.setText(f'<span style="color:{color}">{message}</span>')
+        else:
+            self.statusBar().showMessage(message, 6000)
 
     def _is_internal_remap_stream(self, stream: Dict) -> bool:
         app_name = (stream.get('application_name') or stream.get('application.name') or '').lower()
         media_name = (stream.get('media.name') or '').lower()
         node_name = (stream.get('node.name') or '').lower()
-        if app_name.startswith('sinkswitch_mono.'):
+        if app_name.startswith('sinkswitch_'):
             return True
-        if 'sinkswitch_mono.' in node_name:
+        if 'sinkswitch' in node_name:
             return True
         if media_name.startswith('remapped ') and ' sink output' in media_name:
             return True
@@ -2043,16 +2319,22 @@ class AudioRouterGUI(QMainWindow):
             # Output device: resolve sink index -> name -> friendly
             sink_idx = stream.get('sink', '')
             sink_name = sink_index_to_name.get(sink_idx, sink_idx)
-            mono_remap_active = sink_name.startswith('sinkswitch_mono.') if isinstance(sink_name, str) else False
+            managed_active = (
+                isinstance(sink_name, str) and sink_name.lower().startswith('sinkswitch_')
+            )
             display_sink_name = sink_name
-            if mono_remap_active:
-                display_sink_name = self._normalize_mono_master_sink(sink_name)
+            mono_active = False
+            if managed_active:
+                state = self._get_managed_sink_state()
+                if state:
+                    display_sink_name = state.get('master') or sink_name
+                    mono_active = bool(state.get('mono'))
 
             device = next((d for d in self.devices if d.get('id') == display_sink_name), None)
             out_label = (device.get('friendly_name') or device.get('name')) if device else sink_name
             if not out_label:
                 out_label = display_sink_name or 'Unknown'
-            if mono_remap_active:
+            if mono_active:
                 out_label = f"{out_label} (mono)"
             self.streams_table.setItem(i, 1, QTableWidgetItem(out_label))
             # Route: matching rule name or fallback status for unmatched streams.
@@ -2070,8 +2352,11 @@ class AudioRouterGUI(QMainWindow):
                 route_label = 'Unmatched (not on default)'
             else:
                 route_label = 'Default'
-            if mono_remap_active:
-                route_label = f"{route_label} [Mono active]"
+            if managed_active:
+                route_label = (
+                    f"{route_label} [Mono active]" if mono_active
+                    else f"{route_label} [BT active]"
+                )
             self.streams_table.setItem(i, 2, QTableWidgetItem(route_label))
         self._update_stream_route_buttons_state()
 

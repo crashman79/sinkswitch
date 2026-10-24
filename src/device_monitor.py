@@ -31,7 +31,7 @@ class AudioDevice:
 
 class DeviceMonitor:
     """Monitor and detect audio output devices"""
-    MANAGED_MONO_PREFIX = 'sinkswitch_mono.'
+    MANAGED_PREFIX = 'sinkswitch_'
     _backend_cache: Optional[str] = None
     
     def __init__(self):
@@ -921,7 +921,7 @@ class DeviceMonitor:
         if not sink_id:
             return None
         lowered = sink_id.lower()
-        if lowered.startswith(DeviceMonitor.MANAGED_MONO_PREFIX):
+        if lowered.startswith(DeviceMonitor.MANAGED_PREFIX):
             return None
         if 'bluez' not in lowered:
             return None
@@ -930,7 +930,7 @@ class DeviceMonitor:
 
     @classmethod
     def _is_internal_managed_sink_id(cls, sink_id: str) -> bool:
-        return (sink_id or '').lower().startswith(cls.MANAGED_MONO_PREFIX)
+        return (sink_id or '').lower().startswith(cls.MANAGED_PREFIX)
 
     def _bluez_macs_from_rule_targets(self, rule_target_ids: Set[str]) -> Set[str]:
         return {m for tid in rule_target_ids if (m := self._bluez_mac_from_sink_id(tid))}

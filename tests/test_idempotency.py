@@ -341,7 +341,7 @@ def test_hfp_only_skips_mono_remap():
     engine = AudioRouterEngine()
     with patch.object(DeviceMonitor, "is_headset_profile", return_value=True), \
          patch.object(AudioRouterEngine, "_is_single_channel_bluetooth_sink", return_value=True), \
-         patch.object(AudioRouterEngine, "_ensure_mono_remap_sink", side_effect=fail_if_remap):
+         patch.object(AudioRouterEngine, "_ensure_managed_sink", side_effect=fail_if_remap):
         result = engine._get_effective_target_sink("bluez_output.00_02_3C_AD_09_85.1")
 
     passed = result == "bluez_output.00_02_3C_AD_09_85.1" and not mono_remap_called
@@ -479,9 +479,7 @@ def test_ensure_mono_remap_handles_load_module_timeout():
     with patch("audio_router_engine.subprocess.run", side_effect=fake_run), \
          patch.object(AudioRouterEngine, "_cleanup_sinkswitch_remaps", return_value=None):
         engine = AudioRouterEngine()
-        engine._mono_sink_cache = {}
-        engine._mono_master_sink_id_cache = {}
-        result = engine._ensure_mono_remap_sink("bluez_output.00_02_3C_AD_09_85.1")
+        result = engine._ensure_managed_sink("bluez_output.00_02_3C_AD_09_85.1", mono=True)
 
     passed = result == "bluez_output.00_02_3C_AD_09_85.1"
     status = "✓" if passed else "✗"
@@ -516,8 +514,8 @@ def test_bt_profile_empty_defers_routing():
              "profiles": {"a2dp-sink": "High Fidelity Playback"},
          }), \
          patch.object(AudioRouterEngine, "_is_headset_profile_bluetooth_sink", return_value=False), \
-         patch.object(AudioRouterEngine, "_ensure_mono_remap_sink",
-                      side_effect=lambda m: remap_calls.append(m) or "sinkswitch_mono.should_not_exist"):
+         patch.object(AudioRouterEngine, "_ensure_managed_sink",
+                      side_effect=lambda m, mono=False: remap_calls.append(m) or "sinkswitch_mono.should_not_exist"):
         result = engine._get_effective_target_sink(target)
 
     passed = result is None and not remap_calls
@@ -549,7 +547,7 @@ def test_bt_node_churn_is_debounced():
          }), \
          patch.object(AudioRouterEngine, "_is_headset_profile_bluetooth_sink", return_value=False), \
          patch.object(AudioRouterEngine, "_is_single_channel_bluetooth_sink", return_value=True), \
-         patch.object(AudioRouterEngine, "_ensure_mono_remap_sink", return_value="sinkswitch_mono.ok"), \
+         patch.object(AudioRouterEngine, "_ensure_managed_sink", return_value="sinkswitch_mono.ok"), \
          patch("audio_router_engine.time.monotonic", return_value=1000.0):
         first = engine._get_effective_target_sink(target)
         churned = engine._get_effective_target_sink(target)
@@ -565,13 +563,83 @@ def test_bt_node_churn_is_debounced():
          }), \
          patch.object(AudioRouterEngine, "_is_headset_profile_bluetooth_sink", return_value=False), \
          patch.object(AudioRouterEngine, "_is_single_channel_bluetooth_sink", return_value=True), \
-         patch.object(AudioRouterEngine, "_ensure_mono_remap_sink", return_value="sinkswitch_mono.ok"), \
+         patch.object(AudioRouterEngine, "_ensure_managed_sink", return_value="sinkswitch_mono.ok"), \
          patch("audio_router_engine.time.monotonic", return_value=1000.0 + AudioRouterEngine.BT_SETTLE_SEC + 0.1):
         settled = engine._get_effective_target_sink(target)
 
     passed = first == "sinkswitch_mono.ok" and churned is None and settled == "sinkswitch_mono.ok"
     status = "✓" if passed else "✗"
     print(f"{status} churn deferred then routed (first={first}, churned={churned}, settled={settled})")
+    return passed
+
+
+def test_managed_sink_is_singleton():
+    """SinkSwitch must create exactly one managed sink and never duplicate it.
+
+    When the Bluetooth master or the mono/stereo requirement changes, the single
+    managed sink is unloaded and recreated -- not stacked alongside the old one.
+    """
+    print("\n" + "="*80)
+    print("TEST 12b: Managed Sink Is A Singleton (No Duplicate Sinks)")
+    print("="*80)
+
+    state = {"modules": {}}  # sink_name -> (module_id, master)
+    load_id = [200]
+    counters = {"load": 0, "unload": 0}
+
+    def fake_run(cmd, **kwargs):
+        joined = " ".join(cmd)
+        if "pactl list short modules" in joined:
+            lines = [
+                f"{mid}\tmodule-remap-sink\tsink_name={sn} master={master}"
+                for sn, (mid, master) in state["modules"].items()
+            ]
+            return SimpleNamespace(returncode=0, stdout="\n".join(lines), stderr="")
+        # NOTE: check "unload-module" before "load-module" -- "unload-module"
+        # contains the substring "load-module", so the wrong branch would win.
+        if "unload-module" in joined:
+            counters["unload"] += 1
+            mid = cmd[cmd.index("unload-module") + 1]
+            for sn, (m, _) in list(state["modules"].items()):
+                if m == mid:
+                    del state["modules"][sn]
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "load-module" in joined:
+            counters["load"] += 1
+            mid = str(load_id[0])
+            load_id[0] += 1
+            sn = next((p.split("=", 1)[1] for p in cmd if p.startswith("sink_name=")), "sinkswitch_bt")
+            master = next((p.split("=", 1)[1] for p in cmd if p.startswith("master=")), "m")
+            state["modules"][sn] = (mid, master)
+            return SimpleNamespace(returncode=0, stdout=mid, stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def resolve(device_name, allow_managed_remaps=True):
+        if device_name == AudioRouterEngine.MANAGED_SINK_NAME:
+            if "sinkswitch_bt" in state["modules"]:
+                return ("100", "sinkswitch_bt")
+            return None
+        return ("13", device_name)
+
+    engine = _make_engine_without_cleanup()
+    with patch("audio_router_engine.subprocess.run", side_effect=fake_run), \
+         patch.object(AudioRouterEngine, "_resolve_sink", side_effect=resolve):
+        r1 = engine._ensure_managed_sink("bluez_output.AA_BB_CC_DD_EE_FF.1", mono=False)
+        r2 = engine._ensure_managed_sink("bluez_output.AA_BB_CC_DD_EE_FF.2", mono=False)
+        r3 = engine._ensure_managed_sink("bluez_output.AA_BB_CC_DD_EE_FF.2", mono=True)
+
+    passed = (
+        r1 == r2 == r3 == "sinkswitch_bt"
+        and len(state["modules"]) == 1
+        and "sinkswitch_bt" in state["modules"]
+        and counters["load"] == 3
+        and counters["unload"] == 2
+    )
+    status = "✓" if passed else "✗"
+    print(
+        f"{status} one managed sink (modules={list(state['modules'])}, "
+        f"load={counters['load']}, unload={counters['unload']})"
+    )
     return passed
 
 
@@ -651,6 +719,7 @@ def main():
     test_10 = test_ensure_mono_remap_handles_load_module_timeout()
     test_11 = test_bt_profile_empty_defers_routing()
     test_12 = test_bt_node_churn_is_debounced()
+    test_12b = test_managed_sink_is_singleton()
     test_13 = test_apply_rule_defers_when_bt_not_ready()
     test_14 = test_default_fallback_does_not_move_to_unready_bt()
 
@@ -669,11 +738,12 @@ def main():
     print(f"Remap Load-Module Timeout:  {'✓ PASS' if test_10 else '✗ FAIL'}")
     print(f"BT Not-Ready Gate:          {'✓ PASS' if test_11 else '✗ FAIL'}")
     print(f"BT Node-Churn Debounce:     {'✓ PASS' if test_12 else '✗ FAIL'}")
+    print(f"Managed Sink Singleton:     {'✓ PASS' if test_12b else '✗ FAIL'}")
     print(f"Deferred Rule Apply:        {'✓ PASS' if test_13 else '✗ FAIL'}")
     print(f"Deferred Default Fallback:  {'✓ PASS' if test_14 else '✗ FAIL'}")
     print("="*80)
 
-    if all([test_1, test_2, test_3, test_4, test_5, test_6, test_7, test_8, test_9, test_10, test_11, test_12, test_13, test_14]):
+    if all([test_1, test_2, test_3, test_4, test_5, test_6, test_7, test_8, test_9, test_10, test_11, test_12, test_12b, test_13, test_14]):
         print("\n✓ All idempotency tests PASSED\n")
         return 0
     else:

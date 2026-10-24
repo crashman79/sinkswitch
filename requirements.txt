@@ -1,7 +1,9 @@
 PyYAML>=6.0
-dbus-python>=1.2.18
 certifi>=2023.0.0
 
-# Optional dependencies for tray icon
-# These are usually pre-installed on desktop systems
-PyQt6>=6.0  # For PyQt6 tray icon (proper Wayland support)
+# PyQt6 is the GUI/tray toolkit (proper Wayland support) and provides QtDBus
+# for portal integration. It is bundled into the Flatpak via the pinned wheels
+# in flatpak/*.yml, so it is listed here only for non-Flatpak local installs.
+# NOTE: D-Bus access uses PyQt6.QtDBus -- the legacy dbus-python binding is NOT
+# used anywhere and must not be reintroduced.
+PyQt6>=6.0

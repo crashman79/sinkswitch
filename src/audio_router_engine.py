@@ -17,7 +17,13 @@ logger = logging.getLogger(__name__)
 
 class AudioRouterEngine:
     """Engine for applying audio routing rules"""
-    MONO_REMAP_PREFIX = 'sinkswitch_mono.'
+    # A single, short, fixed-name sink that SinkSwitch creates to redirect
+    # Bluetooth audio. Whether it is a mono remap (single-earbud) or a stereo
+    # passthrough is a (re)creation parameter -- there is never more than one of
+    # these at a time. The bare prefix identifies any SinkSwitch-managed module
+    # (old ``sinkswitch_mono.*`` vestiges included) for listing/cleanup.
+    MANAGED_SINK_NAME = 'sinkswitch_bt'
+    MANAGED_PREFIX = 'sinkswitch_'
 
     # BlueZ/pipewire expose a Bluetooth sink node before the transport is
     # actually usable.  These constants keep routing out of that window.
@@ -45,9 +51,11 @@ class AudioRouterEngine:
         self.device_monitor = DeviceMonitor()
         self.auto_mono_single_channel_bluetooth = auto_mono_single_channel_bluetooth
         self.force_bluetooth_mono = force_bluetooth_mono
-        self._mono_sink_cache: Dict[str, str] = {}
-        self._mono_master_sink_id_cache: Dict[str, str] = {}
-        self._required_mono_masters: Set[str] = set()
+        # Exactly one SinkSwitch-created sink. ``_managed_sink`` tracks its
+        # current master device and mono flag so we can reuse it or recreate it
+        # (never duplicate it) when the target or mono requirement changes.
+        self._managed_sink: Optional[Dict[str, Any]] = None
+        self._managed_sink_required: bool = False
         # Bluetooth readiness / debounce / backoff state.
         self._bt_observed_master_ids: Dict[str, str] = {}
         self._bt_settle_until: Dict[str, float] = {}
@@ -306,10 +314,16 @@ class AudioRouterEngine:
 
 
     def _normalize_master_sink_name(self, sink_name: str) -> str:
-        """Unwrap SinkSwitch mono remap sink names to their physical master sink."""
+        """Unwrap a SinkSwitch managed sink name to its physical master sink.
+
+        The managed sink has a fixed name (``sinkswitch_bt``) that does not encode
+        the device, so the underlying master is tracked in ``self._managed_sink``.
+        """
         out = sink_name or ''
-        while out.startswith(self.MONO_REMAP_PREFIX):
-            out = out[len(self.MONO_REMAP_PREFIX):]
+        if out == self.MANAGED_SINK_NAME and self._managed_sink:
+            return self._managed_sink.get('master', out)
+        while out.startswith(self.MANAGED_PREFIX):
+            out = out[len(self.MANAGED_PREFIX):]
         return out
 
     def _list_sinkswitch_remap_modules(self) -> List[Dict[str, str]]:
@@ -338,7 +352,7 @@ class AudioRouterEngine:
                 sink_match = re.search(r'\bsink_name=([^\s]+)', args)
                 master_match = re.search(r'\bmaster=([^\s]+)', args)
                 sink_name = sink_match.group(1) if sink_match else ''
-                if not sink_name.startswith(self.MONO_REMAP_PREFIX):
+                if not sink_name.startswith(self.MANAGED_PREFIX):
                     continue
                 modules.append(
                     {
@@ -401,7 +415,7 @@ class AudioRouterEngine:
                 continue
 
             master = self._normalize_master_sink_name(mod.get('master', ''))
-            required = master in self._required_mono_masters
+            required = self._managed_sink_required
             state = sink_states.get(sink_name, 'UNKNOWN')
             should_unload = startup or (not required and state != 'RUNNING')
             if not should_unload:
@@ -416,7 +430,8 @@ class AudioRouterEngine:
                 check=False,
             )
             if unload_res.returncode == 0:
-                self._mono_sink_cache.pop(master, None)
+                if self._managed_sink and self._managed_sink.get('master') == master:
+                    self._managed_sink = None
 
     def _get_sink_channel_count(self, sink_name: str) -> Optional[int]:
         """Return sink channel count parsed from pactl list sinks."""
@@ -522,33 +537,6 @@ class AudioRouterEngine:
             return False
         return self._get_sink_channel_count(sink_name) == 1
 
-    def _find_existing_mono_remap_sink(self, master_sink: str) -> Optional[str]:
-        """Return existing mono remap sink name for master_sink, if present.
-
-        The master= field stored in the module args is the resolved PipeWire sink
-        name (may include profile suffix).  We match by MAC address for Bluetooth
-        sinks so fuzzy-named devices are still recognised.
-        """
-        normalized_master = self._normalize_master_sink_name(master_sink)
-        # Extract MAC portion for fuzzy BT matching (XX_XX_XX_XX_XX_XX)
-        bt_mac: Optional[str] = None
-        if 'bluez' in normalized_master.lower():
-            parts = normalized_master.split('.')
-            if len(parts) >= 2:
-                bt_mac = parts[1]
-
-        for mod in self._list_sinkswitch_remap_modules():
-            mod_master = self._normalize_master_sink_name(mod.get('master', ''))
-            if mod_master == normalized_master:
-                sink_name = mod.get('sink_name', '')
-                if sink_name:
-                    return sink_name
-            if bt_mac and bt_mac in mod_master:
-                sink_name = mod.get('sink_name', '')
-                if sink_name:
-                    return sink_name
-        return None
-
     def _fix_remap_output_routing(self, mono_sink_name: str, actual_master_name: str) -> None:
         """Move the remap module's internal output stream to the correct master sink.
 
@@ -611,10 +599,10 @@ class AudioRouterEngine:
         except Exception as e:
             logger.debug("_fix_remap_output_routing error: %s", e)
 
-    def _unload_mono_remap_sink(self, mono_sink_name: str) -> bool:
-        """Unload one SinkSwitch mono remap module by sink name."""
+    def _unload_managed_sink_by_name(self, sink_name: str) -> bool:
+        """Unload a SinkSwitch managed module by sink name."""
         for mod in self._list_sinkswitch_remap_modules():
-            if mod.get('sink_name') != mono_sink_name:
+            if mod.get('sink_name') != sink_name:
                 continue
             module_id = mod.get('id', '')
             if not module_id:
@@ -630,25 +618,36 @@ class AudioRouterEngine:
                 )
             except Exception as e:
                 logger.warning(
-                    "Failed to unload stale mono remap sink %s: %s",
-                    mono_sink_name,
+                    "Failed to unload managed sink %s: %s",
+                    sink_name,
                     e,
                 )
                 return False
             if unload_res.returncode == 0:
-                logger.info("Unloaded stale Bluetooth mono remap sink %s", mono_sink_name)
+                if self._managed_sink and self._managed_sink.get('master_name'):
+                    self._managed_sink = None
+                logger.info("Unloaded managed sink %s", sink_name)
                 return True
             err = (unload_res.stderr or unload_res.stdout or '').strip()
             logger.warning(
-                "Failed to unload stale mono remap sink %s: %s",
-                mono_sink_name,
+                "Failed to unload managed sink %s: %s",
+                sink_name,
                 err or f"exit {unload_res.returncode}",
             )
             return False
         return False
 
-    def _ensure_mono_remap_sink(self, master_sink: str) -> str:
-        """Create/reuse a mono remap sink for master_sink; return sink to route to."""
+    def _ensure_managed_sink(self, master_sink: str, mono: bool) -> str:
+        """Create/reuse the single SinkSwitch managed sink for ``master_sink``.
+
+        There is exactly one SinkSwitch-created sink (``MANAGED_SINK_NAME``).  It
+        is (re)created as a mono remap when ``mono`` is True, otherwise as a
+        stereo passthrough remap.  If the existing managed sink already matches
+        the requested master and mono flag it is reused; otherwise the single
+        existing module is unloaded first so we never end up with two sinks.
+        Returns the sink name to route to (the managed sink, or ``master_sink`` on
+        failure so routing degrades gracefully to the real device).
+        """
         master_sink = self._normalize_master_sink_name(master_sink)
 
         # Resolve the actual PipeWire sink name for master= so module-remap-sink
@@ -659,59 +658,47 @@ class AudioRouterEngine:
         resolved_master = self._resolve_sink(master_sink, allow_managed_remaps=False)
         if not resolved_master:
             self._log_rate_limited(
-                f"mono-master-missing:{master_sink}",
-                "Cannot create mono remap sink: master %r not found",
+                f"managed-master-missing:{master_sink}",
+                "Cannot create managed sink: master %r not found",
                 master_sink,
             )
             return master_sink
         actual_master_id, actual_master_name = resolved_master
-        is_bluetooth_master = 'bluez' in actual_master_name.lower()
-        previous_master_id = self._mono_master_sink_id_cache.get(master_sink)
 
-        if is_bluetooth_master and previous_master_id and previous_master_id != actual_master_id:
-            stale_cached = self._mono_sink_cache.pop(master_sink, None)
-            if stale_cached:
-                self._unload_mono_remap_sink(stale_cached)
-            stale_existing = self._find_existing_mono_remap_sink(master_sink)
-            if stale_existing:
-                self._unload_mono_remap_sink(stale_existing)
-            logger.info(
-                "Bluetooth sink instance changed for %s (%s -> %s); forcing mono remap rebuild",
-                master_sink,
-                previous_master_id,
-                actual_master_id,
-            )
+        # Reuse the existing managed sink when it already matches the request.
+        if self._managed_sink:
+            cur = self._managed_sink
+            if (
+                cur.get('master_name') == actual_master_name
+                and cur.get('mono') == mono
+                and self._resolve_sink(self.MANAGED_SINK_NAME)
+            ):
+                self._fix_remap_output_routing(self.MANAGED_SINK_NAME, actual_master_name)
+                return self.MANAGED_SINK_NAME
 
-        cached = self._mono_sink_cache.get(master_sink)
-        if cached and self._resolve_sink(cached):
-            self._mono_master_sink_id_cache[master_sink] = actual_master_id
-            self._fix_remap_output_routing(cached, actual_master_name)
-            return cached
+        # Master or mono flag changed (or no managed sink yet): unload the single
+        # existing module before (re)creating so there is never more than one.
+        for mod in self._list_sinkswitch_remap_modules():
+            if mod.get('sink_name') == self.MANAGED_SINK_NAME:
+                self._unload_managed_sink_by_name(self.MANAGED_SINK_NAME)
 
-        existing = self._find_existing_mono_remap_sink(master_sink)
-        if existing and self._resolve_sink(existing):
-            self._mono_sink_cache[master_sink] = existing
-            self._mono_master_sink_id_cache[master_sink] = actual_master_id
-            self._fix_remap_output_routing(existing, actual_master_name)
-            return existing
-
-        sanitized = re.sub(r'[^a-zA-Z0-9_.-]', '_', master_sink)
-        mono_sink_name = f"{self.MONO_REMAP_PREFIX}{sanitized}"[:120]
-        sink_desc = f"SinkSwitch_Mono_for_{sanitized}"[:160]
+        sink_desc = f"SinkSwitch_{'Mono' if mono else 'Stereo'}_BT"
+        args = [
+            'pactl',
+            'load-module',
+            'module-remap-sink',
+            f'sink_name={self.MANAGED_SINK_NAME}',
+            f'master={actual_master_name}',
+            f'sink_properties=device.description={sink_desc}',
+        ]
+        if mono:
+            args += ['channels=1', 'channel_map=mono', 'remix=yes']
+        else:
+            args += ['channels=2', 'channel_map=front-left,front-right', 'remix=no']
 
         try:
             result = subprocess.run(
-                host_cmd([
-                    'pactl',
-                    'load-module',
-                    'module-remap-sink',
-                    f'sink_name={mono_sink_name}',
-                    f'master={actual_master_name}',
-                    f'sink_properties=device.description={sink_desc}',
-                    'channels=1',
-                    'channel_map=mono',
-                    'remix=yes',
-                ]),
+                host_cmd(args),
                 capture_output=True,
                 text=True,
                 **SUBPROCESS_TEXT_KW,
@@ -720,7 +707,7 @@ class AudioRouterEngine:
             )
         except Exception as e:
             logger.warning(
-                "Failed to create mono remap sink for %s: %s",
+                "Failed to create managed sink for %s: %s",
                 master_sink,
                 e,
             )
@@ -729,18 +716,100 @@ class AudioRouterEngine:
         if result.returncode != 0:
             err = (result.stderr or result.stdout or '').strip()
             logger.warning(
-                "Failed to create mono remap sink for %s: %s",
+                "Failed to create managed sink for %s: %s",
                 master_sink,
                 err or f"exit {result.returncode}",
             )
             return master_sink
 
-        if self._resolve_sink(mono_sink_name):
-            self._mono_sink_cache[master_sink] = mono_sink_name
-            self._mono_master_sink_id_cache[master_sink] = actual_master_id
-            self._fix_remap_output_routing(mono_sink_name, actual_master_name)
-            return mono_sink_name
+        if self._resolve_sink(self.MANAGED_SINK_NAME):
+            self._managed_sink = {
+                'master': master_sink,
+                'master_id': actual_master_id,
+                'master_name': actual_master_name,
+                'mono': mono,
+            }
+            self._fix_remap_output_routing(self.MANAGED_SINK_NAME, actual_master_name)
+            return self.MANAGED_SINK_NAME
         return master_sink
+
+    def get_managed_sink_state(self) -> Optional[Dict[str, Any]]:
+        """Return the current managed sink descriptor, or None if none exists.
+
+        Used by the GUI to label streams routed through the managed sink and to
+        resolve the real (physical) device they land on.
+        """
+        if not self._managed_sink:
+            return None
+        if not self._resolve_sink(self.MANAGED_SINK_NAME):
+            self._managed_sink = None
+            return None
+        return dict(self._managed_sink)
+
+    def get_bluetooth_volume_target(self) -> Optional[str]:
+        """Return the sink name whose volume the Bluetooth volume shortcuts adjust.
+
+        Prefers the live Bluetooth master behind the managed sink; falls back to
+        the first connected Bluetooth sink reported by the device monitor.
+        """
+        state = self.get_managed_sink_state()
+        if state and state.get('master_name'):
+            return state['master_name']
+        try:
+            for d in self.device_monitor.get_devices():
+                did = d.get('id', '')
+                if 'bluez' in did.lower() and d.get('connected'):
+                    return did
+        except Exception:
+            pass
+        return None
+
+    def adjust_bluetooth_volume(self, delta: str) -> bool:
+        """Adjust the Bluetooth sink volume by a relative amount (e.g. '+5%').
+
+        Returns False if there is no Bluetooth target or the pactl call fails.
+        """
+        target = self.get_bluetooth_volume_target()
+        if not target:
+            return False
+        try:
+            res = subprocess.run(
+                host_cmd(['pactl', 'set-sink-volume', target, delta]),
+                capture_output=True,
+                text=True,
+                **SUBPROCESS_TEXT_KW,
+                timeout=5,
+                check=False,
+            )
+            if res.returncode != 0:
+                logger.warning(
+                    "Failed to adjust Bluetooth volume for %s (%s): %s",
+                    target, delta, (res.stderr or res.stdout or '').strip(),
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.warning("Failed to adjust Bluetooth volume: %s", e)
+            return False
+
+    def toggle_bluetooth_mute(self) -> bool:
+        """Toggle the Bluetooth sink mute state."""
+        target = self.get_bluetooth_volume_target()
+        if not target:
+            return False
+        try:
+            res = subprocess.run(
+                host_cmd(['pactl', 'set-sink-mute', target, 'toggle']),
+                capture_output=True,
+                text=True,
+                **SUBPROCESS_TEXT_KW,
+                timeout=5,
+                check=False,
+            )
+            return res.returncode == 0
+        except Exception as e:
+            logger.warning("Failed to toggle Bluetooth mute: %s", e)
+            return False
 
     def _repair_remap_output_after_move(self, mono_sink_name: str) -> None:
         """Repair remap output routing after app streams are moved.
@@ -831,19 +900,19 @@ class AudioRouterEngine:
 
         self._note_bt_ready(master_sink)
 
+        # Decide whether the single managed sink should be mono or stereo.
         if self.force_bluetooth_mono:
-            mono_sink = self._ensure_mono_remap_sink(master_sink)
-            self._required_mono_masters.add(master_sink)
-            return mono_sink
+            mono = True
+        elif not self.auto_mono_single_channel_bluetooth:
+            mono = False
+        elif self._is_single_channel_bluetooth_sink(master_sink):
+            mono = True
+        else:
+            mono = False
 
-        if not self.auto_mono_single_channel_bluetooth:
-            return sink_name
-        if not self._is_single_channel_bluetooth_sink(master_sink):
-            return sink_name
-
-        mono_sink = self._ensure_mono_remap_sink(master_sink)
-        self._required_mono_masters.add(master_sink)
-        return mono_sink
+        managed = self._ensure_managed_sink(master_sink, mono)
+        self._managed_sink_required = True
+        return managed
 
     def _is_headset_profile_bluetooth_sink(self, sink_name: str) -> bool:
         """Return True when a Bluetooth sink belongs to a card in the HFP/HSP headset profile."""
@@ -861,7 +930,7 @@ class AudioRouterEngine:
 
     def cleanup_managed_sinks(self) -> None:
         """Public cleanup helper used when stopping the in-app monitor."""
-        self._required_mono_masters = set()
+        self._managed_sink_required = False
         self._cleanup_sinkswitch_remaps(startup=True)
     
     def _generate_fallback_rules(self) -> List[Dict]:
@@ -895,7 +964,7 @@ class AudioRouterEngine:
 
         _start = time.time()
         results = []
-        self._required_mono_masters = set()
+        self._managed_sink_required = False
         
         for rule in rules:
             result = self._apply_rule(rule)
@@ -1152,25 +1221,25 @@ class AudioRouterEngine:
             return []
 
     def _is_internal_remap_sink_input(self, stream: Dict[str, str]) -> bool:
-        """Return True for SinkSwitch-managed internal mono remap output streams."""
+        """Return True for SinkSwitch-managed internal remap output streams."""
         node_name = (stream.get('node_name') or '').strip()
         media_name = (stream.get('media_name') or '').strip()
         app_name = (stream.get('application_name') or '').strip()
 
-        if node_name.startswith(f"output.{self.MONO_REMAP_PREFIX}"):
+        if node_name.startswith(f"output.{self.MANAGED_PREFIX}"):
             return True
-        if node_name.startswith(self.MONO_REMAP_PREFIX):
+        if node_name.startswith(self.MANAGED_PREFIX):
             return True
-        if 'sinkswitch_mono' in node_name.lower():
+        if 'sinkswitch' in node_name.lower():
             return True
 
         lowered_media = media_name.lower()
-        if lowered_media.startswith('sinkswitch_mono_for_') and ' output' in lowered_media:
+        if 'sinkswitch' in lowered_media:
             return True
 
         # Some hosts expose the remap output without app name; keep this as a
         # conservative guard against fallback moving internal streams.
-        if 'sinkswitch_mono' in app_name.lower():
+        if 'sinkswitch' in app_name.lower():
             return True
         return False
 
@@ -1395,7 +1464,7 @@ class AudioRouterEngine:
             # Managed mono remap names must resolve exactly.
             use_bluetooth_fuzzy = (
                 requested_lower.startswith('bluez_output.')
-                and not requested.startswith(self.MONO_REMAP_PREFIX)
+                and not requested.startswith(self.MANAGED_PREFIX)
             )
             result = subprocess.run(
                 host_cmd(['pactl', 'list', 'sinks']),
@@ -1410,12 +1479,12 @@ class AudioRouterEngine:
                     current_sink_id = line.split('#')[1].strip()
                 elif 'Name:' in line:
                     name_value = line.split('Name:')[1].strip()
-                    if (not allow_managed_remaps) and name_value.startswith(self.MONO_REMAP_PREFIX):
+                    if (not allow_managed_remaps) and name_value.startswith(self.MANAGED_PREFIX):
                         continue
                     if name_value == requested:
                         return (current_sink_id, name_value)
                     if use_bluetooth_fuzzy and name_value.lower().startswith('bluez_output.'):
-                        if (not allow_managed_remaps) and name_value.startswith(self.MONO_REMAP_PREFIX):
+                        if (not allow_managed_remaps) and name_value.startswith(self.MANAGED_PREFIX):
                             continue
                         parts = requested.split('.')
                         if len(parts) >= 2:
@@ -1528,7 +1597,7 @@ class AudioRouterEngine:
 
             # When routing to a mono remap sink, also correct the remap's own
             # output stream target after app streams are moved (lazy creation).
-            if any_ok and target_sink_name.startswith(self.MONO_REMAP_PREFIX):
+            if any_ok and target_sink_name.startswith(self.MANAGED_PREFIX):
                 self._repair_remap_output_after_move(target_sink_name)
             return any_ok
         except Exception as e:
