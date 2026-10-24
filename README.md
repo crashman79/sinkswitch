@@ -123,7 +123,7 @@ If your desktop provides a system tray, SoundCorral adds an icon with **Show**, 
 
 The **Bluetooth volume shortcuts** option lets you control only the Bluetooth output with a modifier plus the normal volume keys, for example Ctrl + Volume Up. Plain volume keys still control your speakers through your desktop as usual. This uses the desktop's Global Shortcuts portal.
 
-The first time you enable it, your desktop may show a shortcut permission/configuration dialog. Accept it to bind the three shortcuts. If your desktop does not assign the keys automatically, open **System Settings → Shortcuts**, find SoundCorral, and assign the Bluetooth volume shortcuts there. The status line under the setting tells you whether the keys are active or still need to be assigned. If the portal is unavailable or you deny the request, the rest of the app still works normally.
+The first time you enable it, your desktop may show a shortcut permission/configuration dialog. Accept it to bind the three shortcuts. If your desktop does not assign the keys automatically, SoundCorral opens the shortcut settings for you; alternatively, open **System Settings → Shortcuts**, find SoundCorral, and assign the Bluetooth volume shortcuts there. The status line under the setting tells you whether the keys are active or still need to be assigned. If the portal is unavailable or you deny the request, the rest of the app still works normally.
 
 ## Rules file
 

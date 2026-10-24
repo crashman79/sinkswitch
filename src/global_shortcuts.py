@@ -23,11 +23,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from PyQt6.QtCore import QObject, pyqtSignal
 
 try:
-    from jeepney import DBusAddress, MatchRule, new_method_call
+    from jeepney import DBusAddress, HeaderFields, MatchRule, new_method_call
     from jeepney.io.blocking import open_dbus_connection
     _JEEPNEY_AVAILABLE = True
 except ImportError:  # pragma: no cover - depends on packaging
     DBusAddress = None  # type: ignore[assignment]
+    HeaderFields = None  # type: ignore[assignment]
     MatchRule = None  # type: ignore[assignment]
     new_method_call = None  # type: ignore[assignment]
     open_dbus_connection = None  # type: ignore[assignment]
@@ -305,13 +306,28 @@ class GlobalShortcutsController(QObject):
             )
             return False
 
+        if not self._report_binding_status(bound):
+            # The portal remembers shortcut IDs across sessions. If an earlier
+            # attempt was dismissed, the IDs come back with no keys assigned;
+            # open the desktop's shortcut configuration so the user can fix it.
+            self._configure_shortcuts(conn, session)
+        return True
+
+    def _report_binding_status(self, bound: List[Any]) -> bool:
+        """Report which shortcuts have keys; return True if any are assigned."""
         assigned: List[str] = []
         unassigned: List[str] = []
         for entry in bound:
             props = entry[1] if isinstance(entry, (list, tuple)) and len(entry) > 1 else {}
-            trigger = _variant_value(props.get("trigger_description")) if isinstance(props, dict) else ""
+            trigger = (
+                _variant_value(props.get("trigger_description"))
+                if isinstance(props, dict)
+                else ""
+            )
             description = (
-                _variant_value(props.get("description")) if isinstance(props, dict) else ""
+                _variant_value(props.get("description"))
+                if isinstance(props, dict)
+                else ""
             )
             label = str(description or entry[0])
             if trigger:
@@ -334,13 +350,41 @@ class GlobalShortcutsController(QObject):
                 "Shortcuts registered but no keys assigned. Open System Settings → "
                 "Shortcuts and assign the SoundCorral Bluetooth volume shortcuts.",
             )
-        return True
+        return bool(assigned) and not unassigned
+
+    def _configure_shortcuts(self, conn, session: str) -> None:
+        """Ask the portal to show its shortcut configuration UI."""
+        try:
+            conn.send_and_get_reply(
+                new_method_call(
+                    DBusAddress(
+                        PORTAL_PATH,
+                        bus_name=PORTAL_SERVICE,
+                        interface=PORTAL_IFACE,
+                    ),
+                    "ConfigureShortcuts",
+                    "osa{sv}",
+                    (session, "", {"handle_token": ("s", _token())}),
+                ),
+                timeout=5.0,
+            )
+            self._report(
+                "warn",
+                "Opened shortcut settings; assign the SoundCorral Bluetooth volume "
+                "shortcuts there.",
+            )
+        except Exception as e:
+            logger.debug("Could not open shortcut configuration", exc_info=True)
+            self._report(
+                "warn",
+                f"Could not open shortcut settings ({e}). Use System Settings → "
+                "Shortcuts to assign the SoundCorral Bluetooth volume shortcuts.",
+            )
 
     def _listen(self, conn, session: str) -> None:
         rule = MatchRule(
             type="signal",
             interface=PORTAL_IFACE,
-            member="Activated",
             path=session,
         )
         with conn.filter(rule) as queue:
@@ -352,13 +396,19 @@ class GlobalShortcutsController(QObject):
                 except Exception:
                     logger.debug("GlobalShortcuts listener stopped", exc_info=True)
                     return
+                member = message.header.fields.get(HeaderFields.member)
                 args = message.body
                 if len(args) < 2:
                     continue
-                shortcut_id = _variant_value(args[1])
-                action = _SHORTCUT_TO_ACTION.get(str(shortcut_id))
-                if action:
-                    self.activated.emit(action)
+                if member == "Activated":
+                    shortcut_id = _variant_value(args[1])
+                    action = _SHORTCUT_TO_ACTION.get(str(shortcut_id))
+                    if action:
+                        self.activated.emit(action)
+                elif member == "ShortcutsChanged":
+                    bound = _variant_value(args[1]) or []
+                    self._bound_shortcuts = list(bound)
+                    self._report_binding_status(bound)
 
     def _wait_for_response(self, conn, request_path: str, timeout: float):
         rule = MatchRule(
