@@ -1,293 +1,205 @@
 # SinkSwitch
 
-Send each app's audio to the output you want — Bluetooth earbuds, a USB headset,
-HDMI TV, or your speakers — instead of everything fighting over one device.
+SinkSwitch is a Linux desktop app that lets you choose where each app's audio plays. You can keep a browser on Bluetooth headphones, a game on your speakers, and a call on a USB headset at the same time, without changing the output for everything else.
 
-SinkSwitch is a small desktop app for Linux. You pick a **default output** (where
-unmatched apps go) and then define **rules** so specific apps always play through
-the device you choose. It runs entirely on your machine using PipeWire or
-PulseAudio; there is no account, no cloud, and no background service to manage.
+Everything runs inside the app. There is no account, no cloud service, and no separate background daemon to install or manage.
 
-> Typical use: keep your music or video call on Bluetooth earbuds while game
-> sound and system notifications stay on the speakers — automatically, the moment
-> each app starts playing.
+## What it does
 
----
+SinkSwitch watches the audio streams on your system and moves them to the output you want:
 
-## Why SinkSwitch (advantages)
+- Apps that match a **routing rule** go to that rule's device.
+- Apps that match no rule go to the **Default output** you choose at the top of the window.
+- You can also move a single stream by hand with the quick-route buttons, either just for now (**Temporary**) or as a saved rule (**Permanent**).
 
-- **Per-app routing without the fiddling.** New audio streams are caught
-  automatically and moved to the right device based on rules you define once.
-- **Your speaker volume keys still work.** SinkSwitch adds an *optional*
-  modifier‑plus‑volume shortcut that controls **only** the Bluetooth device.
-  The plain volume keys keep controlling your speakers, exactly as your desktop
-  always did.
-- **One Bluetooth control point.** When you route to Bluetooth, SinkSwitch
-  creates a single virtual "SinkSwitch Bluetooth" output that all your
-  Bluetooth‑routed apps share. That is what lets one keyboard shortcut adjust
-  them together, and it handles single‑earbud mono mixing cleanly.
-- **Calm interface.** The device and stream lists refresh only when something
-  actually changes — a device connects, an app starts playing, or you switch the
-  default output. No constant flicker or CPU churn from polling.
-- **Just an app.** No daemon, systemd unit, or root service. Start it, stop it,
-  or leave it in the tray.
+It works with PipeWire or PulseAudio, through the standard system audio tools.
 
----
+## Why use it
 
-## How it works (design and logic, in plain terms)
+- **Per-app control.** Different programs can use different outputs at the same time.
+- **Automatic routing.** Rules move matching apps whenever their audio appears, so you set it up once.
+- **See what is happening.** Connected devices and active streams are shown together, with the current route for each stream.
+- **Fast one-off changes.** Send the currently playing stream somewhere else in a click, temporarily or permanently.
+- **Better Bluetooth handling.** Bluetooth-routed apps share one managed SinkSwitch Bluetooth output, which gives you a single volume control point and allows mono mixing for single-earbud listening.
+- **Quiet when nothing changes.** The lists refresh when your audio setup actually changes instead of polling constantly, so the window does not flicker.
 
-**The router lives inside the app.** When routing is on, a small loop inside
-SinkSwitch watches your audio graph. For every app that starts playing, it asks:
+## How routing works
 
-1. *Does this app match one of my rules?* If yes, move its audio to that rule's
-   target device.
-2. *If not, leave it on the default output* you selected in the toolbar.
+The router runs in the background while the app is open. It looks at the audio streams that are currently playing and compares each app against your rules.
 
-That's the whole model. When the router is stopped, SinkSwitch stops moving
-streams: apps already sent to a device stay there until they finish, and any new
-streams are left to play on the system default. Start it again and the rules
-reapply.
+1. If an app matches a rule, its stream is moved to the rule's target device.
+2. If an app matches no rule, its stream is moved to the current Default output.
+3. If a rule's target device is unavailable (for example, a Bluetooth device that is not ready yet), SinkSwitch uses the rule's fallback setting. With fallback on, matching apps go to your Default output and the rule is retried once the device becomes usable. With fallback off, matching apps stay where they are until the target is available.
 
-**Rules are simple and forgiving.** Each rule has a name, a list of apps (by
-name or keyword), a target device, and an optional *fallback*: if the target
-isn't connected right now (earbuds in the case?), the app falls back to your
-default output instead of going silent. You can make rules in the **Routing
-Rules** tab or let SinkSwitch generate a sensible starter set on first run.
+Bluetooth is handled a little differently from other outputs. Instead of sending each app straight to the Bluetooth device, SinkSwitch creates one managed Bluetooth output and sends all Bluetooth-routed apps through it. The app still shows the real device name, with "(mono)" added when the mono version is active. If that managed output cannot be created, routing falls back to the real Bluetooth device, so audio keeps working.
 
-**Bluetooth is special.** Rather than pointing each app straight at the raw
-Bluetooth device, SinkSwitch routes them through one managed virtual sink that
-mirrors your earbuds. This gives a single, reliable volume control and makes the
-modifier‑plus‑volume shortcut possible. If Bluetooth isn't available, routing
-simply degrades to the real device.
+Stopping the router only stops it from managing streams. Streams that are already playing stay where they are, and new streams simply use your system default. Starting the router again reapplies your rules.
 
-**Volume shortcuts.** With the setting enabled, a global hotkey —
-*modifier* + Volume Up/Down/Mute (e.g. Ctrl+VolumeUp) — nudges the Bluetooth
-output's volume. It uses the desktop's Global Shortcuts portal, so your desktop
-environment still owns the unmodified keys. The first time, your desktop may ask
-for permission; if you decline, the setting just shows a status and the rest of
-the app works normally.
+## Using the app
 
-**Refresh is event‑driven.** Instead of re‑scanning every couple of seconds,
-SinkSwitch listens to system audio events and only redraws the lists when the
-parsed data actually changes. A slow safety check runs in the background in case
-event notifications are unavailable, and even that never redraws unchanged data.
+### The top bar
 
----
+Across the top of the window you will find:
 
-## The interface
+- **Router status**, which shows whether the router is running.
+- **Default output**, the device used for apps that match no rule. Changing it also changes your system default output and, if the router is running, restarts it so the change takes effect immediately.
+- **Force Mono: OFF / ON**, which forces the mono Bluetooth output even when the device reports stereo. When off, mono is used only if automatic single-earbud detection is enabled and a one-channel Bluetooth device is found.
+- **Start / Restart** and **Stop** buttons for the router.
+- **Refresh Devices** on the Devices & Streams tab, for an immediate re-scan.
 
-The window has a toolbar and a few tabs:
+### Devices & Streams
 
-- **Devices & Streams** — the main view.
-  - *Devices:* the outputs SinkSwitch can see, with a status dot (green =
-    connected, red = disconnected).
-  - *Active Streams:* the apps currently playing, where each one is going, and
-    its Route (a rule name, a temporary override, or "Default"). Select a stream
-    and use **Bluetooth / HDMI / Analog speakers** to send it there. Choose
-    **Temporary** (applies while the router runs) or **Permanent** (saved as a
-    rule).
-- **Routing Rules** — view, add, edit, delete, and auto‑generate rules, then
-  save your config.
-- **Logs** — a live view of what the router is doing (handy when something
-  doesn't route as expected).
-- **Settings** — startup, appearance, tray, Bluetooth mono, and the volume
-  shortcut (see below).
-- **About** — version, config location, and update checks.
+This tab has two tables.
 
-**Toolbar:** a router status indicator, the **Default output** selector, a
-**Force Mono** toggle (force Bluetooth to mono regardless of detection), and
-**Start / Restart / Stop** for the router.
+**Devices** lists the outputs SinkSwitch can see:
 
-**System tray:** minimize to tray, show the window, start/stop the router, and
-quit — all from the tray menu. Closing the window minimizes to tray when that
-option is enabled.
+- a status dot (green for connected, red for disconnected, grey for unknown),
+- the device name,
+- the device type (Bluetooth, HDMI, analog speakers, USB, and so on),
+- the internal device ID.
 
----
+**Active Streams** lists what is currently playing:
+
+- the application name,
+- the output device it is on,
+- the **Route** column, which tells you why it is there: a rule name, `Temporary override (device)`, `Default`, or `Unmatched (not on default)`. Bluetooth streams also show `[BT active]` or `[Mono active]`.
+
+To move one stream by hand, select it, choose **Temporary** or **Permanent**, then click **Bluetooth**, **HDMI**, or **Analog speakers**. A quick-route button is only available when a connected device of that type exists.
+
+- **Temporary** moves only the selected stream. It lasts while the router keeps running; stopping or restarting the router clears it.
+- **Permanent** moves the stream now, then saves or updates a routing rule for that app and restarts the router so the change sticks.
+
+### Routing Rules
+
+This tab lists your rules and their target devices. From here you can:
+
+- **Add** a rule,
+- **Edit** or **Delete** the selected rule,
+- **Auto-Generate Rules** from the devices that are currently connected,
+- **Save** your changes.
+
+A rule has a name, a list of applications, optional application keywords, a target device, and an **Enable default fallback** option. Matching is name-based: an app matches when its name contains one of the listed names, or when one of the keywords appears in the app name. Keywords are useful for apps whose reported name varies.
+
+With **Enable default fallback** checked (the default), matching apps use your Default output while the rule's target device is unavailable, and SinkSwitch retries the rule when the device comes back. When it is unchecked, matching apps wait on their current output until the target is available. The rules list shows this setting as `[AUTO]` (fallback on) or `[LOCKED]` (fallback off).
+
+On first run, SinkSwitch creates a starter set of rules based on the devices it finds. Treat those as a starting point and adjust them to suit your setup.
+
+### Logs
+
+A log view of what the router is doing, with **Refresh** and **Clear** buttons. This is the first place to look if an app is not going where you expect.
+
+### Settings
+
+Startup, appearance, tray behavior, Bluetooth mono handling, and the optional Bluetooth volume shortcut are all configured here. See the settings list below.
+
+### About
+
+Shows the app version, where your configuration is stored, and how many rules you have. It also has an update check, which works in the packaged build but not when running from source.
+
+### System tray
+
+If your desktop provides a system tray, SinkSwitch adds an icon with **Show**, **Start router** / **Restart router**, **Stop router**, and **Quit**. If you enable **Close to tray**, closing the window hides it instead of quitting. SinkSwitch allows only one running copy at a time.
 
 ## Getting started
 
-1. **Install and launch** SinkSwitch (see *Install* below).
-2. On first run it creates a config and, if you have devices connected, generates
-   a starter set of rules (browsers/meetings/media → Bluetooth/USB when present).
-   Review them in **Routing Rules**; edit or remove anything you don't want.
-3. The router **starts automatically by default** (you can turn this off in
-   Settings). If it's stopped, click **Start** in the toolbar.
-4. Play something and watch **Active Streams**. Matched apps move to their rule's
-   device; everything else stays on the **Default output** you picked.
-5. Need a one‑off change? Select a stream and click **Bluetooth / HDMI /
-   Analog** — Temporary for now, or Permanent to remember it.
+1. Launch SinkSwitch. Routing starts automatically by default.
+2. Pick the **Default output** you want for apps that do not match a rule.
+3. Connect your devices (Bluetooth, USB, HDMI, speakers) and click **Refresh Devices** if they do not appear.
+4. Open **Routing Rules** and either adjust the starter rules or click **Auto-Generate Rules**.
+5. Play something and check the **Active Streams** table. If an app is in the wrong place, select it and use a quick-route button, or add a rule for it.
 
----
+## Settings
 
-## Settings explained
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Start SinkSwitch when I log in | Off | Adds SinkSwitch to your login startup. |
+| Start minimized (tray only when possible) | Off | Starts the app hidden in the tray at login. Available once login startup is enabled. |
+| Start routing automatically when app opens | On | Starts the router as soon as SinkSwitch launches. |
+| Theme | System (follow desktop) | Follows your desktop theme, or forces Light or Dark. |
+| Close to tray | Off | Closing the window hides it in the tray instead of quitting. |
+| Auto-mono for single-earbud Bluetooth | On | Mixes stereo to mono when a one-channel Bluetooth output is detected; keeps stereo when both channels are available. |
+| Use a modifier + volume keys to control the Bluetooth device | On | Enables the optional modifier + volume shortcut described below. |
+| Modifier key | Ctrl | The modifier used with Volume Up, Volume Down, and Mute (Ctrl, Super, or Alt). |
 
-| Setting | What it does |
-| --- | --- |
-| **Start SinkSwitch when I log in** | Adds SinkSwitch to your login startup (Flatpak XDG autostart, with a portal fallback). |
-| **Start minimized (tray only when possible)** | Opens to the tray on login instead of a window. |
-| **Start routing automatically when app opens** | Turns the router on at launch (on by default). |
-| **Theme** | Follow the desktop, or force Light/Dark. |
-| **Close to tray** | Closing the window hides it in the tray instead of quitting. |
-| **Auto‑mono for single‑earbud Bluetooth** | Mixes left/right to mono when a Bluetooth device reports one channel (e.g. one earbud in the case); stays stereo when both channels are present. |
-| **Use a modifier + volume keys to control the Bluetooth device** | Enables the global Bluetooth volume shortcut. Pick the modifier (Ctrl / Super / Alt). A status line shows whether the shortcut is active or was denied. |
+The **Bluetooth volume shortcuts** option lets you control only the Bluetooth output with a modifier plus the normal volume keys, for example Ctrl + Volume Up. Plain volume keys still control your speakers through your desktop as usual. This uses the desktop's Global Shortcuts portal. On the first use your desktop may ask for permission; if the shortcut cannot be registered, the rest of the app still works normally.
 
----
+## Rules file
 
-## Limitations and caveats
+Rules are stored as plain YAML in:
 
-SinkSwitch is purpose‑built for a normal Linux desktop audio setup. A few honest
-boundaries:
+```
+~/.config/sinkswitch/config/routing_rules.yaml
+```
 
-- **Linux only.** It relies on PipeWire or PulseAudio and the desktop portals;
-  there is no Windows or macOS build.
-- **Bluetooth volume shortcut needs a compatible desktop.** It uses the
-  Global Shortcuts portal (present on current KDE/GNOME under both Wayland and
-  X11). If your desktop doesn't support it, the shortcut simply won't bind — the
-  status line tells you — and you can still set Bluetooth volume from your sound
-  settings. The rest of the app is unaffected.
-- **It routes streams that are playing.** An app that already locked its audio to
-  a device before routing started may need a quick manual re‑route (select it in
-  Active Streams and click a target). New streams are caught automatically.
-- **App detection is name‑based.** Most native apps are identified cleanly.
-  Apps that hide behind a generic host (some Wine/Proton games, or browsers where
-  every tab looks the same) may not match a rule by name — for those, use the
-  one‑click quick route.
-- **Auto‑generated rules are a starting point.** They're based on device type and
-  common app names; glance at them and adjust to taste.
-- **One Bluetooth target at a time.** The managed Bluetooth output follows the
-  Bluetooth device your rules route to. If you switch which earbuds you use,
-  update the rule's target (or re‑run Auto‑Generate).
-- **No capture/recording, no system‑wide EQ.** SinkSwitch moves existing playback
-  streams between outputs; it does not process or record audio.
+You can set the `AUDIO_ROUTER_CONFIG` environment variable to use a different folder. Editing the file by hand is optional; the app writes it when you add, edit, or quick-route rules.
 
----
+A rule looks like this:
 
-## Intended uses
+```yaml
+routing_rules:
+  - name: Browser to Bluetooth
+    applications:
+      - firefox
+      - chromium
+    application_keywords:
+      - browser
+    target_device: bluez_output.XX_XX_XX_XX_XX_XX.1
+    enable_default_fallback: true
+```
 
-- Keep a video call or music on Bluetooth earbuds while game audio and system
-  notifications stay on the speakers.
-- Send meetings to a USB headset and music to Bluetooth — automatically.
-- Route a specific app (a browser tab, a media player) to the HDMI TV.
-- Throw the currently focused app to Bluetooth with a single click, temporarily
-  or permanently.
-- Quiet the earbuds with one shortcut while the speaker volume keys keep doing
-  their normal job.
+The target device is the internal device name shown in the Devices table.
 
----
+## Things to know
+
+- **Linux only**, and it needs PipeWire or PulseAudio with the usual command-line audio tools available.
+- **It routes streams that are playing.** If an app started and locked itself to a device before the router was running, a quick re-route will usually fix it.
+- **Detection is name-based.** Launchers and compatibility layers such as Wine or Proton, and some browsers, may report generic names. If an app does not match automatically, add a keyword or use the quick-route buttons.
+- **One Bluetooth target at a time.** All Bluetooth-routed apps share the single managed Bluetooth output.
+- **Stopping does not undo routes.** Already-playing streams stay on their current output; only new streams return to the system default until you start the router again.
+- **Temporary routes are temporary.** They are cleared when the router stops or restarts.
+- **The Bluetooth volume shortcut needs desktop support** for the Global Shortcuts portal. If your desktop does not provide it, the shortcut simply will not bind.
+- **Hand-edited rules are read when the app loads them**, so save and restart the router after changing the file while the app is open.
+- **SinkSwitch does not record, process, or upload audio.** It only moves streams between outputs.
+- **Update checks only work in the packaged build**, not when running from source.
 
 ## Install
 
-### Option A — GitHub release (Flatpak)
+### Option A: Flatpak release bundle
 
-From [Releases](https://github.com/crashman79/sinkswitch/releases), download
-**`sinkswitch-<version>-x86_64.flatpak`**, then:
+Download `sinkswitch-<version>-x86_64.flatpak` from the [GitHub Releases](https://github.com/crashman79/sinkswitch/releases) page, then install and launch it:
 
 ```bash
 flatpak install --user ./sinkswitch-<version>-x86_64.flatpak
 flatpak run io.github.crashman79.sinkswitch
 ```
 
-### Option B — Flatpak (build from source)
+### Option B: Build the Flatpak from source
 
-See **[flatpak/README.md](flatpak/README.md)**. After
-`flatpak-builder --install`, run `flatpak run io.github.crashman79.sinkswitch`.
-
-### Option C — From source or a virtual environment
-
-With Python 3.8+ and the dependencies from `requirements.txt`:
+With Flatpak and `flatpak-builder` installed, run this from the source checkout:
 
 ```bash
-pip install -r requirements.txt
+./build-and-run.sh
+```
+
+The helper installs any missing runtime or SDK, builds the app, and launches it.
+
+### Option C: Run from source
+
+With Python 3 and the system audio tools installed:
+
+```bash
+python3 -m pip install -r requirements.txt
 python3 run_app.py
 ```
 
-Config and behavior are identical; the config directory is
-`~/.config/sinkswitch/` (override with the `AUDIO_ROUTER_CONFIG` environment
-variable).
+This is also the usual path for development.
 
-### Quick Flatpak build and run (development)
+## Development
 
-Requires Flatpak, `flatpak-builder`, and the Freedesktop 24.08 runtime/SDK (see
-**[flatpak/README.md](flatpak/README.md)**).
-
-```bash
-./build-and-run.sh                 # build + install + run
-./build-and-run.sh --clean         # wipe the build dir first
-./build-and-run.sh -- --minimized  # launch minimized (tray)
-```
-
----
-
-## Config and rules (optional manual editing)
-
-- **Config directory:** `~/.config/sinkswitch/` (or `AUDIO_ROUTER_CONFIG`)
-- **Rules file:** `config/routing_rules.yaml` inside that directory
-
-You normally manage rules from the GUI, but the file is plain YAML if you prefer
-to edit it. A rule looks like:
-
-```yaml
-routing_rules:
-  - name: "Conference Apps to Bluetooth"
-    applications:
-      - "zoom"
-      - "teams"
-      - "discord"
-    target_device: "bluez_output.00_02_3C_AD_09_85.1"
-    enable_default_fallback: true
-```
-
-- `applications` — app names or keywords to match.
-- `target_device` — the device name from `pactl list sinks` (the **Name:** line).
-- `enable_default_fallback` — if the target isn't connected, use the default
-  output instead of going silent.
-
-See `examples/` for more samples. To find device names:
-`pactl list sinks | grep -i "Name:"`.
-
----
-
-## Command line (advanced)
-
-With the repository on your `PYTHONPATH` (or from the repo root), the engine can
-be driven without the GUI:
-
-```bash
-python3 src/audio_router.py list-devices
-python3 src/audio_router.py generate-config --output config/routing_rules.yaml
-python3 src/audio_router.py apply-rules config/routing_rules.yaml
-python3 src/audio_router.py monitor config/routing_rules.yaml
-```
-
-The GUI runs the same routing monitor internally; these commands are optional
-for scripting or debugging.
-
----
-
-## Updates
-
-When you run the built (Flatpak) binary, the **About** tab can check for new
-releases on GitHub and download them in place. Update checks are only available
-in the packaged build, not when running from source.
-
----
-
-## For maintainers
-
-- Pushing a tag `v*` runs the **Flatpak release** workflow: it builds
-  `sinkswitch-<version>-x86_64.flatpak` and attaches it to a GitHub release.
-- Before tagging, bump **`src/_version.py`** and the `<release>` entry in
-  **`flatpak/io.github.crashman79.sinkswitch.metainfo.xml`** (or let CI rewrite
-  them from the tag). The Flathub manifest pins the source commit, so update
-  `flatpak/io.github.crashman79.sinkswitch-flathub.yml`'s `commit:` to the
-  release commit for a Flathub submission.
-
----
+SinkSwitch is developed and maintained by its author. GitHub Copilot and OpenCode have been used for development, diagnostic debugging, and troubleshooting. All changes are reviewed and tested before release.
 
 ## License
 
-MIT.
+SinkSwitch is released under the **MIT License**.
 
-The bundled application icon is derived from the KDE Breeze icon theme
-(`audio-card`), licensed under LGPL-3.0-or-later / LGPL-2.1-only. See
-[`data/icons/NOTICE`](data/icons/NOTICE) and the included license texts.
+The bundled application icon is derived from KDE's Breeze icon theme and is provided under its own LGPL terms (LGPL-3.0-or-later and LGPL-2.1-only). See the included icon notices for details.
