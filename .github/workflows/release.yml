@@ -89,6 +89,7 @@ jobs:
       - name: Create Release
         uses: ncipollo/release-action@v1
         with:
+          name: SoundCorral ${{ env.VERSION }}
           artifacts: "_release/sinkswitch-*-x86_64.flatpak"
           generateReleaseNotes: true
           token: ${{ secrets.GITHUB_TOKEN }}
