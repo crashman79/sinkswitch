@@ -1010,46 +1010,102 @@ class AudioRouterEngine:
                     'message': 'No target device configured for this rule',
                 }
 
-            # Route only to targets whose Bluetooth transport is actually ready.
-            # A node that exists but has no active A2DP profile is not routable
-            # yet; defer instead of pinning remaps/streams to it.
+            # Route only to targets that exist and whose Bluetooth transport is
+            # actually ready.  A node that exists but has no active A2DP profile
+            # is not routable yet; a target that is gone entirely cannot be used
+            # at all.  Both are candidates for the rule's default fallback.
             effective_targets: List[str] = []
             ready_targets: List[str] = []
             deferred_targets: List[str] = []
+            unavailable_targets: List[str] = []
             for target in all_targets:
                 effective = self._get_effective_target_sink(target)
                 if not effective:
                     deferred_targets.append(target)
+                    continue
+                if not self._resolve_sink(effective):
+                    unavailable_targets.append(target)
                     continue
                 ready_targets.append(target)
                 if effective not in effective_targets:
                     effective_targets.append(effective)
 
             logger.debug(
-                "Rule %r target resolution: preferred=%r ready=%s deferred=%s",
+                "Rule %r target resolution: preferred=%r ready=%s deferred=%s unavailable=%s",
                 rule_name,
                 target_device,
                 ready_targets,
                 deferred_targets,
+                unavailable_targets,
             )
 
             if not effective_targets:
-                reason = 'not ready'
-                for target in deferred_targets:
-                    state = self._bt_state.get(self._normalize_master_sink_name(target))
-                    if state:
-                        reason = state[1]
-                        break
+                if deferred_targets:
+                    reason = 'not ready'
+                    for target in deferred_targets:
+                        state = self._bt_state.get(self._normalize_master_sink_name(target))
+                        if state:
+                            reason = state[1]
+                            break
+                    waiting_message = (
+                        f"Waiting for Bluetooth transport "
+                        f"({self._bt_reason_label(reason)})"
+                    )
+                    retry_after = self._bt_retry_after(deferred_targets)
+                else:
+                    waiting_message = (
+                        "Target device not available: "
+                        + ", ".join(str(t) for t in unavailable_targets)
+                    )
+                    retry_after = None
+
+                # Honour the rule's fallback setting instead of leaving matched
+                # apps on whatever device they happen to be using.
+                if rule.get('enable_default_fallback', True):
+                    (
+                        fallback_sink,
+                        _fallback_index,
+                        fallback_retry,
+                        fallback_reason,
+                    ) = self._resolve_default_routing_sink()
+                    if fallback_sink:
+                        routed = self._route_applications(
+                            applications,
+                            keywords,
+                            [fallback_sink],
+                        )
+                        result = {
+                            'rule_name': rule_name,
+                            'success': True,
+                            'routed_count': routed,
+                            'fallback': True,
+                            'message': (
+                                f"Target unavailable; routed {routed} stream(s) "
+                                f"to default output"
+                            ),
+                        }
+                        if retry_after is not None:
+                            result['retry_after'] = retry_after
+                        return result
+
+                    return {
+                        'rule_name': rule_name,
+                        'success': True,
+                        'routed_count': 0,
+                        'deferred': True,
+                        'retry_after': (
+                            fallback_retry if fallback_retry is not None else retry_after
+                        ),
+                        'message': f"{waiting_message}; {fallback_reason}",
+                    }
+
                 return {
                     'rule_name': rule_name,
                     'success': True,
                     'routed_count': 0,
                     'deferred': True,
-                    'retry_after': self._bt_retry_after(deferred_targets),
-                    'message': (
-                        f"Waiting for Bluetooth transport "
-                        f"({self._bt_reason_label(reason)})"
-                    ),
+                    'retry_after': retry_after,
+                    'message': waiting_message,
                 }
 
             routed = self._route_applications(
@@ -1277,25 +1333,28 @@ class AudioRouterEngine:
         )
         return False
 
-    def _route_unmatched_streams_to_default(self, rules: List[Dict]) -> Dict:
-        """Move streams that match no rule to the current default sink."""
+    def _resolve_default_routing_sink(
+        self,
+    ) -> Tuple[Optional[str], Optional[str], Optional[float], Optional[str]]:
+        """Resolve the system default sink for routing.
+
+        Returns ``(sink_name, sink_index, retry_after, reason)``.  When the
+        default cannot be used right now, ``sink_name`` is ``None`` and
+        ``reason`` explains why.  ``retry_after`` is set when waiting for a
+        Bluetooth transport may make it usable.
+        """
         default_sink_name = self.device_monitor.get_default_sink()
         if not default_sink_name:
-            return {
-                'rule_name': 'Default fallback',
-                'success': False,
-                'routed_count': 0,
-                'message': 'No default sink available',
-            }
+            return None, None, None, 'No default sink available'
 
         resolved = self._resolve_sink(default_sink_name)
         if not resolved:
-            return {
-                'rule_name': 'Default fallback',
-                'success': False,
-                'routed_count': 0,
-                'message': f"Could not resolve default sink: {default_sink_name}",
-            }
+            return (
+                None,
+                None,
+                None,
+                f"Could not resolve default sink: {default_sink_name}",
+            )
 
         default_sink_id, default_sink_name_resolved = resolved
 
@@ -1308,18 +1367,42 @@ class AudioRouterEngine:
                 ready, reason = self._evaluate_bt_readiness(master)
                 if not ready:
                     retry = self._note_bt_not_ready(master, reason)
-                    return {
-                        'rule_name': 'Default fallback',
-                        'success': True,
-                        'routed_count': 0,
-                        'deferred': True,
-                        'retry_after': retry,
-                        'message': (
-                            "Default Bluetooth output not ready "
-                            f"({self._bt_reason_label(reason)}); leaving streams in place"
-                        ),
-                    }
-                self._note_bt_ready(master)
+                    return (
+                        None,
+                        None,
+                        retry,
+                        "Default Bluetooth output not ready "
+                        f"({self._bt_reason_label(reason)})",
+                    )
+            self._note_bt_ready(master)
+
+        return default_sink_name_resolved, default_sink_id, None, None
+
+    def _route_unmatched_streams_to_default(self, rules: List[Dict]) -> Dict:
+        """Move streams that match no rule to the current default sink."""
+        (
+            default_sink_name_resolved,
+            default_sink_id,
+            retry_after,
+            reason,
+        ) = self._resolve_default_routing_sink()
+
+        if not default_sink_name_resolved:
+            if retry_after is not None:
+                return {
+                    'rule_name': 'Default fallback',
+                    'success': True,
+                    'routed_count': 0,
+                    'deferred': True,
+                    'retry_after': retry_after,
+                    'message': f"{reason}; leaving streams in place",
+                }
+            return {
+                'rule_name': 'Default fallback',
+                'success': False,
+                'routed_count': 0,
+                'message': reason or 'No default sink available',
+            }
 
         streams = self._get_sink_inputs()
         moved = 0

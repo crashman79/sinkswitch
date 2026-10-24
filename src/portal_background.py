@@ -103,7 +103,7 @@ class PortalBackgroundRequest(QObject):
             return
         reply = pr.reply()
 
-        if reply.type() != QDBusMessage.Type.ReplyMessage:
+        if reply.type() != QDBusMessage.MessageType.ReplyMessage:
             err = reply.errorMessage() or "unknown D-Bus error"
             logger.warning("RequestBackground failed: %s", err)
             self._finish(False, f"Could not open system dialog: {err}")

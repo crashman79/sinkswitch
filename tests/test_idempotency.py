@@ -644,7 +644,7 @@ def test_managed_sink_is_singleton():
 
 
 def test_apply_rule_defers_when_bt_not_ready():
-    """A deferred Bluetooth target returns a retry hint and moves no streams."""
+    """A locked rule returns a retry hint and moves no streams when BT is not ready."""
     print("\n" + "="*80)
     print("TEST 13: Rule Apply Defers Instead Of Retrying Noisily")
     print("="*80)
@@ -661,6 +661,7 @@ def test_apply_rule_defers_when_bt_not_ready():
             "name": "deferred-rule",
             "target_device": target,
             "applications": ["firefox"],
+            "enable_default_fallback": False,
         })
 
     passed = (
@@ -701,6 +702,46 @@ def test_default_fallback_does_not_move_to_unready_bt():
     return passed
 
 
+def test_apply_rule_falls_back_to_default_when_enabled():
+    """An enabled fallback routes matched apps to the default sink when BT is not ready."""
+    print("\n" + "="*80)
+    print("TEST 15: Rule Apply Falls Back To Default Output")
+    print("="*80)
+
+    engine = _make_engine_without_cleanup()
+    target = "bluez_output.00_02_3C_AD_09_85.1"
+    default = "alsa_output.pci-0000_0e_00.4.analog-stereo"
+    engine._bt_state[target] = ("waiting", "profile-empty")
+    engine._bt_backoff_until[target] = 1234.0
+    route_calls = []
+
+    with patch.object(AudioRouterEngine, "_prioritize_target_sinks",
+                      side_effect=lambda preferred, targets: list(targets)), \
+         patch.object(AudioRouterEngine, "_get_effective_target_sink", return_value=None), \
+         patch.object(AudioRouterEngine, "_resolve_default_routing_sink",
+                      return_value=(default, "13", None, None)), \
+         patch.object(AudioRouterEngine, "_route_applications",
+                      side_effect=lambda apps, kws, targets: route_calls.append(
+                          (apps, kws, targets)) or 2):
+        result = engine._apply_rule({
+            "name": "fallback-rule",
+            "target_device": target,
+            "applications": ["firefox"],
+            "enable_default_fallback": True,
+        })
+
+    passed = (
+        result.get("fallback") is True
+        and result.get("routed_count") == 2
+        and route_calls
+        and route_calls[0][2] == [default]
+        and result.get("retry_after") is not None
+    )
+    status = "✓" if passed else "✗"
+    print(f"{status} Fallback result: {result}; calls={route_calls}")
+    return passed
+
+
 def main():
     print("\n" + "="*80)
     print("IDEMPOTENCY TEST SUITE")
@@ -722,6 +763,7 @@ def main():
     test_12b = test_managed_sink_is_singleton()
     test_13 = test_apply_rule_defers_when_bt_not_ready()
     test_14 = test_default_fallback_does_not_move_to_unready_bt()
+    test_15 = test_apply_rule_falls_back_to_default_when_enabled()
 
     print("\n" + "="*80)
     print("TEST SUMMARY")
@@ -741,9 +783,10 @@ def main():
     print(f"Managed Sink Singleton:     {'✓ PASS' if test_12b else '✗ FAIL'}")
     print(f"Deferred Rule Apply:        {'✓ PASS' if test_13 else '✗ FAIL'}")
     print(f"Deferred Default Fallback:  {'✓ PASS' if test_14 else '✗ FAIL'}")
+    print(f"Rule Default Fallback:      {'✓ PASS' if test_15 else '✗ FAIL'}")
     print("="*80)
 
-    if all([test_1, test_2, test_3, test_4, test_5, test_6, test_7, test_8, test_9, test_10, test_11, test_12, test_12b, test_13, test_14]):
+    if all([test_1, test_2, test_3, test_4, test_5, test_6, test_7, test_8, test_9, test_10, test_11, test_12, test_12b, test_13, test_14, test_15]):
         print("\n✓ All idempotency tests PASSED\n")
         return 0
     else:

@@ -216,7 +216,7 @@ class GlobalShortcutsController(QObject):
             self._report("error", f"Portal call failed: {pr.error().message()}")
             return
         reply = pr.reply()
-        if reply.type() != QDBusMessage.Type.ReplyMessage:
+        if reply.type() != QDBusMessage.MessageType.ReplyMessage:
             self._report("error", "Portal returned no reply")
             return
         args = reply.arguments()

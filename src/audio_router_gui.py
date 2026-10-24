@@ -2705,10 +2705,14 @@ class AudioRouterGUI(QMainWindow):
         running = self._router_running()
         if running:
             self.status_label.setText("Router: Running")
-            self.status_label.setStyleSheet("color: green; font-weight: bold; padding: 5px;")
+            self.status_label.setStyleSheet(
+                "color: #22c55e; font-weight: bold; padding: 5px;"
+            )
         else:
             self.status_label.setText("Router: Stopped")
-            self.status_label.setStyleSheet("color: red; font-weight: bold; padding: 5px;")
+            self.status_label.setStyleSheet(
+                "color: #ef4444; font-weight: bold; padding: 5px;"
+            )
         self.start_or_restart_btn.setText("Restart" if running else "Start")
         self.stop_btn.setEnabled(running)
     
