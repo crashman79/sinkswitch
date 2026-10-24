@@ -1,10 +1,10 @@
-# Packaging SinkSwitch
+# Packaging SoundCorral
 
 ## What to expect
 
-SinkSwitch is distributed as a Flatpak and can also run from source or a user venv on Linux.
+SoundCorral is distributed as a Flatpak and can also run from source or a user venv on Linux.
 
-SinkSwitch runs **`pactl` and `pw-cli` on the host**. The **Flatpak** build does this via `flatpak-spawn --host` (`src/host_command.py`); other sandboxed formats would need similar glue.
+SoundCorral runs **`pactl` and `pw-cli` on the host**. The **Flatpak** build does this via `flatpak-spawn --host` (`src/host_command.py`); other sandboxed formats would need similar glue.
 
 ## Recommended ways to run
 

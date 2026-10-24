@@ -358,7 +358,7 @@ class DeviceMonitor:
     def is_headset_profile(self, device_address: str) -> bool:
         """Return True when the Bluetooth card is currently in a headset (HFP/HSP) profile.
 
-        HFP/HSP sinks are inherently mono (typically 16 kHz); SinkSwitch must not
+        HFP/HSP sinks are inherently mono (typically 16 kHz); SoundCorral must not
         try to create a mono remap sink on top of them — that is pointless and a
         ``pactl load-module`` against a dying HFP transport can hang and wedge the
         audio server.

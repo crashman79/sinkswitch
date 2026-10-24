@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the SinkSwitch Flatpak from this repo and run it (user install).
+# Build the SoundCorral Flatpak from this repo and run it (user install).
 # Requires: flatpak, flatpak-builder; Freedesktop 24.08 Platform/SDK from Flathub.
 #
 #   ./build-and-run.sh                      # build + install + run

@@ -17,10 +17,10 @@ logger = logging.getLogger(__name__)
 
 class AudioRouterEngine:
     """Engine for applying audio routing rules"""
-    # A single, short, fixed-name sink that SinkSwitch creates to redirect
+    # A single, short, fixed-name sink that SoundCorral creates to redirect
     # Bluetooth audio. Whether it is a mono remap (single-earbud) or a stereo
     # passthrough is a (re)creation parameter -- there is never more than one of
-    # these at a time. The bare prefix identifies any SinkSwitch-managed module
+    # these at a time. The bare prefix identifies any SoundCorral-managed module
     # (old ``sinkswitch_mono.*`` vestiges included) for listing/cleanup.
     MANAGED_SINK_NAME = 'sinkswitch_bt'
     MANAGED_PREFIX = 'sinkswitch_'
@@ -51,7 +51,7 @@ class AudioRouterEngine:
         self.device_monitor = DeviceMonitor()
         self.auto_mono_single_channel_bluetooth = auto_mono_single_channel_bluetooth
         self.force_bluetooth_mono = force_bluetooth_mono
-        # Exactly one SinkSwitch-created sink. ``_managed_sink`` tracks its
+        # Exactly one SoundCorral-created sink. ``_managed_sink`` tracks its
         # current master device and mono flag so we can reuse it or recreate it
         # (never duplicate it) when the target or mono requirement changes.
         self._managed_sink: Optional[Dict[str, Any]] = None
@@ -314,7 +314,7 @@ class AudioRouterEngine:
 
 
     def _normalize_master_sink_name(self, sink_name: str) -> str:
-        """Unwrap a SinkSwitch managed sink name to its physical master sink.
+        """Unwrap a SoundCorral managed sink name to its physical master sink.
 
         The managed sink has a fixed name (``sinkswitch_bt``) that does not encode
         the device, so the underlying master is tracked in ``self._managed_sink``.
@@ -327,7 +327,7 @@ class AudioRouterEngine:
         return out
 
     def _list_sinkswitch_remap_modules(self) -> List[Dict[str, str]]:
-        """Return module rows for SinkSwitch-managed remap sinks."""
+        """Return module rows for SoundCorral-managed remap sinks."""
         modules: List[Dict[str, str]] = []
         try:
             result = subprocess.run(
@@ -363,7 +363,7 @@ class AudioRouterEngine:
                 )
             return modules
         except Exception as e:
-            logger.debug(f"Failed to list SinkSwitch remap modules: {e}")
+            logger.debug(f"Failed to list SoundCorral remap modules: {e}")
             return modules
 
     def _get_sink_states(self) -> Dict[str, str]:
@@ -393,7 +393,7 @@ class AudioRouterEngine:
             return states
 
     def _cleanup_sinkswitch_remaps(self, startup: bool = False) -> None:
-        """Unload stale SinkSwitch mono remap modules.
+        """Unload stale SoundCorral mono remap modules.
 
         Runtime unload/reload churn can introduce audible fallback-to-default
         windows when browsers recreate streams. Keep remaps stable during normal
@@ -600,7 +600,7 @@ class AudioRouterEngine:
             logger.debug("_fix_remap_output_routing error: %s", e)
 
     def _unload_managed_sink_by_name(self, sink_name: str) -> bool:
-        """Unload a SinkSwitch managed module by sink name."""
+        """Unload a SoundCorral managed module by sink name."""
         for mod in self._list_sinkswitch_remap_modules():
             if mod.get('sink_name') != sink_name:
                 continue
@@ -638,9 +638,9 @@ class AudioRouterEngine:
         return False
 
     def _ensure_managed_sink(self, master_sink: str, mono: bool) -> str:
-        """Create/reuse the single SinkSwitch managed sink for ``master_sink``.
+        """Create/reuse the single SoundCorral managed sink for ``master_sink``.
 
-        There is exactly one SinkSwitch-created sink (``MANAGED_SINK_NAME``).  It
+        There is exactly one SoundCorral-created sink (``MANAGED_SINK_NAME``).  It
         is (re)created as a mono remap when ``mono`` is True, otherwise as a
         stereo passthrough remap.  If the existing managed sink already matches
         the requested master and mono flag it is reused; otherwise the single
@@ -682,7 +682,7 @@ class AudioRouterEngine:
             if mod.get('sink_name') == self.MANAGED_SINK_NAME:
                 self._unload_managed_sink_by_name(self.MANAGED_SINK_NAME)
 
-        sink_desc = f"SinkSwitch_{'Mono' if mono else 'Stereo'}_BT"
+        sink_desc = f"SoundCorral_{'Mono' if mono else 'Stereo'}_BT"
         args = [
             'pactl',
             'load-module',
@@ -879,7 +879,7 @@ class AudioRouterEngine:
         master_sink = self._normalize_master_sink_name(sink_name)
 
         # HFP/HSP (headset) Bluetooth sinks are inherently mono (16 kHz) SCO
-        # transports. Wrapping them in a SinkSwitch mono remap is pointless and a
+        # transports. Wrapping them in a SoundCorral mono remap is pointless and a
         # pactl load-module against a profile that is mid-switch can hang and
         # wedge the whole audio server, so never mono-remap a headset profile.
         # HFP is a legitimate active profile, so it needs no A2DP readiness check.
@@ -1277,7 +1277,7 @@ class AudioRouterEngine:
             return []
 
     def _is_internal_remap_sink_input(self, stream: Dict[str, str]) -> bool:
-        """Return True for SinkSwitch-managed internal remap output streams."""
+        """Return True for SoundCorral-managed internal remap output streams."""
         node_name = (stream.get('node_name') or '').strip()
         media_name = (stream.get('media_name') or '').strip()
         app_name = (stream.get('application_name') or '').strip()

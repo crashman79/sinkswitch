@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SinkSwitch launcher for source-based development.
+SoundCorral launcher for source-based development.
 - As script:  python3 run_app.py  (from repo root)
 
 Config on first run: ~/.config/sinkswitch/ (or AUDIO_ROUTER_CONFIG).

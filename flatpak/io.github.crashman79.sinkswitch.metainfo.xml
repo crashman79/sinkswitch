@@ -3,11 +3,11 @@
   <id>io.github.crashman79.sinkswitch</id>
   <metadata_license>MIT</metadata_license>
   <project_license>MIT</project_license>
-  <name>SinkSwitch</name>
+  <name>SoundCorral</name>
   <summary>Route application audio to Bluetooth, USB, HDMI, and other outputs</summary>
   <description>
     <p>
-      SinkSwitch lets you pick a default output and define rules so specific applications
+      SoundCorral lets you pick a default output and define rules so specific applications
       use the device you choose. It runs the router inside the GUI and uses PipeWire or
       PulseAudio on your system (host tools are invoked from the sandbox).
     </p>
@@ -37,6 +37,6 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="0.8.4" date="2026-10-24"/>
+    <release version="0.8.5" date="2026-10-24"/>
   </releases>
 </component>

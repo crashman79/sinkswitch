@@ -1,12 +1,12 @@
-# SinkSwitch
+# SoundCorral
 
-SinkSwitch is a Linux desktop app that lets you choose where each app's audio plays. You can keep a browser on Bluetooth headphones, a game on your speakers, and a call on a USB headset at the same time, without changing the output for everything else.
+SoundCorral is a Linux desktop app that lets you choose where each app's audio plays. You can keep a browser on Bluetooth headphones, a game on your speakers, and a call on a USB headset at the same time, without changing the output for everything else.
 
 Everything runs inside the app. There is no account, no cloud service, and no separate background daemon to install or manage.
 
 ## What it does
 
-SinkSwitch watches the audio streams on your system and moves them to the output you want:
+SoundCorral watches the audio streams on your system and moves them to the output you want:
 
 - Apps that match a **routing rule** go to that rule's device.
 - Apps that match no rule go to the **Default output** you choose at the top of the window.
@@ -20,7 +20,7 @@ It works with PipeWire or PulseAudio, through the standard system audio tools.
 - **Automatic routing.** Rules move matching apps whenever their audio appears, so you set it up once.
 - **See what is happening.** Connected devices and active streams are shown together, with the current route for each stream.
 - **Fast one-off changes.** Send the currently playing stream somewhere else in a click, temporarily or permanently.
-- **Better Bluetooth handling.** Bluetooth-routed apps share one managed SinkSwitch Bluetooth output, which gives you a single volume control point and allows mono mixing for single-earbud listening.
+- **Better Bluetooth handling.** Bluetooth-routed apps share one managed SoundCorral Bluetooth output, which gives you a single volume control point and allows mono mixing for single-earbud listening.
 - **Quiet when nothing changes.** The lists refresh when your audio setup actually changes instead of polling constantly, so the window does not flicker.
 
 ## How routing works
@@ -29,9 +29,9 @@ The router runs in the background while the app is open. It looks at the audio s
 
 1. If an app matches a rule, its stream is moved to the rule's target device.
 2. If an app matches no rule, its stream is moved to the current Default output.
-3. If a rule's target device is unavailable (for example, a Bluetooth device that is not ready yet), SinkSwitch uses the rule's fallback setting. With fallback on, matching apps go to your Default output and the rule is retried once the device becomes usable. With fallback off, matching apps stay where they are until the target is available.
+3. If a rule's target device is unavailable (for example, a Bluetooth device that is not ready yet), SoundCorral uses the rule's fallback setting. With fallback on, matching apps go to your Default output and the rule is retried once the device becomes usable. With fallback off, matching apps stay where they are until the target is available.
 
-Bluetooth is handled a little differently from other outputs. Instead of sending each app straight to the Bluetooth device, SinkSwitch creates one managed Bluetooth output and sends all Bluetooth-routed apps through it. The app still shows the real device name, with "(mono)" added when the mono version is active. If that managed output cannot be created, routing falls back to the real Bluetooth device, so audio keeps working.
+Bluetooth is handled a little differently from other outputs. Instead of sending each app straight to the Bluetooth device, SoundCorral creates one managed Bluetooth output and sends all Bluetooth-routed apps through it. The app still shows the real device name, with "(mono)" added when the mono version is active. If that managed output cannot be created, routing falls back to the real Bluetooth device, so audio keeps working.
 
 Stopping the router only stops it from managing streams. Streams that are already playing stay where they are, and new streams simply use your system default. Starting the router again reapplies your rules.
 
@@ -51,7 +51,7 @@ Across the top of the window you will find:
 
 This tab has two tables.
 
-**Devices** lists the outputs SinkSwitch can see:
+**Devices** lists the outputs SoundCorral can see:
 
 - a status dot (green for connected, red for disconnected, grey for unknown),
 - the device name,
@@ -80,9 +80,9 @@ This tab lists your rules and their target devices. From here you can:
 
 A rule has a name, a list of applications, optional application keywords, a target device, and an **Enable default fallback** option. Matching is name-based: an app matches when its name contains one of the listed names, or when one of the keywords appears in the app name. Keywords are useful for apps whose reported name varies.
 
-With **Enable default fallback** checked (the default), matching apps use your Default output while the rule's target device is unavailable, and SinkSwitch retries the rule when the device comes back. When it is unchecked, matching apps wait on their current output until the target is available. The rules list shows this setting as `[AUTO]` (fallback on) or `[LOCKED]` (fallback off).
+With **Enable default fallback** checked (the default), matching apps use your Default output while the rule's target device is unavailable, and SoundCorral retries the rule when the device comes back. When it is unchecked, matching apps wait on their current output until the target is available. The rules list shows this setting as `[AUTO]` (fallback on) or `[LOCKED]` (fallback off).
 
-On first run, SinkSwitch creates a starter set of rules based on the devices it finds. Treat those as a starting point and adjust them to suit your setup.
+On first run, SoundCorral creates a starter set of rules based on the devices it finds. Treat those as a starting point and adjust them to suit your setup.
 
 ### Logs
 
@@ -98,11 +98,11 @@ Shows the app version, where your configuration is stored, and how many rules yo
 
 ### System tray
 
-If your desktop provides a system tray, SinkSwitch adds an icon with **Show**, **Start router** / **Restart router**, **Stop router**, and **Quit**. If you enable **Close to tray**, closing the window hides it instead of quitting. SinkSwitch allows only one running copy at a time.
+If your desktop provides a system tray, SoundCorral adds an icon with **Show**, **Start router** / **Restart router**, **Stop router**, and **Quit**. If you enable **Close to tray**, closing the window hides it instead of quitting. SoundCorral allows only one running copy at a time.
 
 ## Getting started
 
-1. Launch SinkSwitch. Routing starts automatically by default.
+1. Launch SoundCorral. Routing starts automatically by default.
 2. Pick the **Default output** you want for apps that do not match a rule.
 3. Connect your devices (Bluetooth, USB, HDMI, speakers) and click **Refresh Devices** if they do not appear.
 4. Open **Routing Rules** and either adjust the starter rules or click **Auto-Generate Rules**.
@@ -112,9 +112,9 @@ If your desktop provides a system tray, SinkSwitch adds an icon with **Show**, *
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Start SinkSwitch when I log in | Off | Adds SinkSwitch to your login startup. |
+| Start SoundCorral when I log in | Off | Adds SoundCorral to your login startup. |
 | Start minimized (tray only when possible) | Off | Starts the app hidden in the tray at login. Available once login startup is enabled. |
-| Start routing automatically when app opens | On | Starts the router as soon as SinkSwitch launches. |
+| Start routing automatically when app opens | On | Starts the router as soon as SoundCorral launches. |
 | Theme | System (follow desktop) | Follows your desktop theme, or forces Light or Dark. |
 | Close to tray | Off | Closing the window hides it in the tray instead of quitting. |
 | Auto-mono for single-earbud Bluetooth | On | Mixes stereo to mono when a one-channel Bluetooth output is detected; keeps stereo when both channels are available. |
@@ -131,7 +131,7 @@ Rules are stored as plain YAML in:
 ~/.config/sinkswitch/config/routing_rules.yaml
 ```
 
-You can set the `AUDIO_ROUTER_CONFIG` environment variable to use a different folder. Editing the file by hand is optional; the app writes it when you add, edit, or quick-route rules.
+The folder keeps the original `sinkswitch` name (the internal app ID), so existing settings continue to work after the display-name change. You can set the `AUDIO_ROUTER_CONFIG` environment variable to use a different folder. Editing the file by hand is optional; the app writes it when you add, edit, or quick-route rules.
 
 A rule looks like this:
 
@@ -159,7 +159,7 @@ The target device is the internal device name shown in the Devices table.
 - **Temporary routes are temporary.** They are cleared when the router stops or restarts.
 - **The Bluetooth volume shortcut needs desktop support** for the Global Shortcuts portal. If your desktop does not provide it, the shortcut simply will not bind.
 - **Hand-edited rules are read when the app loads them**, so save and restart the router after changing the file while the app is open.
-- **SinkSwitch does not record, process, or upload audio.** It only moves streams between outputs.
+- **SoundCorral does not record, process, or upload audio.** It only moves streams between outputs.
 - **Update checks only work in the packaged build**, not when running from source.
 
 ## Install
@@ -196,10 +196,10 @@ This is also the usual path for development.
 
 ## Development
 
-SinkSwitch is developed and maintained by its author. GitHub Copilot and OpenCode have been used for development, diagnostic debugging, and troubleshooting. All changes are reviewed and tested before release.
+SoundCorral is developed and maintained by its author. GitHub Copilot and OpenCode have been used for development, diagnostic debugging, and troubleshooting. All changes are reviewed and tested before release.
 
 ## License
 
-SinkSwitch is released under the **MIT License**.
+SoundCorral is released under the **MIT License**.
 
 The bundled application icon is derived from KDE's Breeze icon theme and is provided under its own LGPL terms (LGPL-3.0-or-later and LGPL-2.1-only). See the included icon notices for details.

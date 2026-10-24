@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SinkSwitch - standalone GUI app for per-app audio routing.
+SoundCorral - standalone GUI app for per-app audio routing.
 Device monitoring and routing run inside this app; no systemd or install script required.
 
 Requirements: Python 3.8+, PyQt6, PyYAML (pip install -r requirements.txt)
@@ -1099,7 +1099,7 @@ def _apply_native_login_autostart(enable: bool, start_minimized: bool) -> Tuple[
     exec_line = shlex.join(cmd)
     content = f"""[Desktop Entry]
 Type=Application
-Name=SinkSwitch
+Name=SoundCorral
 Comment=Automatic audio routing (start at login)
 Exec={exec_line}
 Icon=audio-card
@@ -1138,7 +1138,7 @@ def _apply_flatpak_xdg_autostart(enable: bool, start_minimized: bool) -> Tuple[b
     exec_line = shlex.join(_flatpak_autostart_exec(start_minimized))
     content = f"""[Desktop Entry]
 Type=Application
-Name=SinkSwitch
+Name=SoundCorral
 Comment=Automatic audio routing (start at login)
 Exec={exec_line}
 Icon={_desktop_icon_name()}
@@ -1222,7 +1222,7 @@ class AudioRouterGUI(QMainWindow):
             return
         self.tray_icon = QSystemTrayIcon(QApplication.instance())
         self.tray_icon.setIcon(self._tray_icon_pixmap())
-        self.tray_icon.setToolTip("SinkSwitch")
+        self.tray_icon.setToolTip("SoundCorral")
         self.tray_menu = QMenu()
         show_act = self.tray_menu.addAction("Show")
         show_act.triggered.connect(self._show_from_tray)
@@ -1318,7 +1318,7 @@ class AudioRouterGUI(QMainWindow):
         if reason == QSystemTrayIcon.ActivationReason.Trigger or reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self._show_from_tray()
 
-    def _show_tray_attention(self, message: str, title: str = "SinkSwitch"):
+    def _show_tray_attention(self, message: str, title: str = "SoundCorral"):
         """Show a brief tray balloon to draw attention when app is in tray."""
         if self.tray_icon and self.tray_icon.isVisible():
             self.tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 2500)
@@ -1346,7 +1346,7 @@ class AudioRouterGUI(QMainWindow):
     
     def init_ui(self):
         """Initialize the user interface"""
-        self.setWindowTitle("SinkSwitch")
+        self.setWindowTitle("SoundCorral")
         self.setMinimumSize(300, 300)
         app_inst = QApplication.instance()
         screen = app_inst.primaryScreen() if app_inst else None
@@ -1708,7 +1708,7 @@ class AudioRouterGUI(QMainWindow):
         )
         hint.setWordWrap(True)
         startup_layout.addWidget(hint)
-        self.login_autostart_check = QCheckBox("Start SinkSwitch when I log in")
+        self.login_autostart_check = QCheckBox("Start SoundCorral when I log in")
         self.login_autostart_check.setChecked(self.login_autostart)
         startup_layout.addWidget(self.login_autostart_check)
         self.start_minimized_at_login_check = QCheckBox("Start minimized (tray only when possible)")
@@ -1744,7 +1744,7 @@ class AudioRouterGUI(QMainWindow):
         )
         self.auto_mono_single_channel_bluetooth_check.setChecked(self.auto_mono_single_channel_bluetooth)
         self.auto_mono_single_channel_bluetooth_check.setToolTip(
-            "When enabled, SinkSwitch detects one-channel Bluetooth outputs and mixes stereo to mono."
+            "When enabled, SoundCorral detects one-channel Bluetooth outputs and mixes stereo to mono."
         )
         left_col.addWidget(self.auto_mono_single_channel_bluetooth_check)
 
@@ -1823,13 +1823,13 @@ class AudioRouterGUI(QMainWindow):
             sl.addWidget(lab)
             return lab
 
-        _wrap_rich("<b>SinkSwitch</b>")
+        _wrap_rich("<b>SoundCorral</b>")
         _wrap_plain(f"Version {__version__}")
         _wrap_plain(f"Build timestamp (UTC): {__build_timestamp__}")
         sl.addSpacing(12)
         _wrap_rich("<b>Default routing (out of the box)</b>")
         _wrap_plain(
-            "On first run, SinkSwitch creates a config and may auto-generate routing rules from your connected devices "
+            "On first run, SoundCorral creates a config and may auto-generate routing rules from your connected devices "
             "(e.g. browsers, meetings, media -> Bluetooth or USB headset). You can edit or remove these in the Routing Rules tab. "
             "Until you click Start, the router does nothing. Once running, matched streams follow rules; "
             "everything else goes to the Default output in the toolbar."
@@ -2943,11 +2943,11 @@ def main():
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL, True)
 
     app = QApplication(sys.argv)
-    app.setApplicationName("SinkSwitch")
+    app.setApplicationName("SoundCorral")
     # Without an explicit desktop file name Qt exposes the process name
     # ("python3"), which KDE can match to another app's StartupWMClass.
     app.setDesktopFileName(_desktop_icon_name())
-    app.setApplicationDisplayName("SinkSwitch")
+    app.setApplicationDisplayName("SoundCorral")
     ic = _app_icon()
     if not ic.isNull():
         app.setWindowIcon(ic)
@@ -2963,8 +2963,8 @@ def main():
     if not _acquire_single_instance_lock():
         QMessageBox.warning(
             None,
-            "SinkSwitch",
-            "Another instance of SinkSwitch is already running.\nUse the system tray icon or application menu to open it.",
+            "SoundCorral",
+            "Another instance of SoundCorral is already running.\nUse the system tray icon or application menu to open it.",
         )
         sys.exit(1)
     

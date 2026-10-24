@@ -262,7 +262,7 @@ def test_routing_rules_generation():
 
 
 def test_bt_master_sink_resolution_skips_managed_remaps():
-    """Regression test: physical Bluetooth sink resolution must ignore SinkSwitch remap sinks."""
+    """Regression test: physical Bluetooth sink resolution must ignore SoundCorral remap sinks."""
     print("\n" + "="*80)
     print("TEST 4: Bluetooth Master Sink Resolution")
     print("="*80)
@@ -325,7 +325,7 @@ def test_bt_off_profile_triggers_recovery():
 
 def test_hfp_only_skips_mono_remap():
     """Regression test: an HFP/headset-profile BT sink (inherently mono) must
-    never be wrapped in a SinkSwitch mono remap sink. In the real bug this
+    never be wrapped in a SoundCorral mono remap sink. In the real bug this
     triggered `pactl load-module module-remap-sink` against a dying HFP
     transport, which hung for 5s and wedged the audio server."""
     print("\n" + "="*80)
@@ -574,7 +574,7 @@ def test_bt_node_churn_is_debounced():
 
 
 def test_managed_sink_is_singleton():
-    """SinkSwitch must create exactly one managed sink and never duplicate it.
+    """SoundCorral must create exactly one managed sink and never duplicate it.
 
     When the Bluetooth master or the mono/stereo requirement changes, the single
     managed sink is unloaded and recreated -- not stacked alongside the old one.

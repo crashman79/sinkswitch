@@ -1,4 +1,4 @@
-# Flatpak manifest for SinkSwitch (build from repository root):
+# Flatpak manifest for SoundCorral (build from repository root):
 #   flatpak install --user flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
 #   flatpak-builder --user --install --force-clean build-dir flatpak/io.github.crashman79.sinkswitch.yml
 #

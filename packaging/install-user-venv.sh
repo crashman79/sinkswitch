@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install SinkSwitch using an isolated venv (no PyInstaller). Most reliable on arbitrary distros.
+# Install SoundCorral using an isolated venv (no PyInstaller). Most reliable on arbitrary distros.
 #
 # From a clone or tarball of the repo (directory that contains run_app.py and requirements.txt):
 #   ./packaging/install-user-venv.sh

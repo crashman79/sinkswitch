@@ -1,6 +1,6 @@
 """Bluetooth volume control via the Global Shortcuts portal.
 
-SinkSwitch redirects Bluetooth audio while the desktop environment keeps
+SoundCorral redirects Bluetooth audio while the desktop environment keeps
 controlling the main/speaker volume with the plain multimedia keys. This module
 adds a *modifier + volume key* shortcut (e.g. Ctrl+VolumeUp) that adjusts the
 Bluetooth device volume without hijacking the OS keys: the DE still owns the

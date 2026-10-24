@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build and install SinkSwitch Flatpak (no standalone binary build path).
+# Build and install SoundCorral Flatpak (no standalone binary build path).
 #
 #   ./build.sh                 # build + install Flatpak
 #   ./build.sh --clean         # remove Flatpak build dir first

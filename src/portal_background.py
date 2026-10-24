@@ -66,9 +66,9 @@ class PortalBackgroundRequest(QObject):
 
         token = "sw" + secrets.token_hex(6)
         reason = (
-            "Start SinkSwitch at login so audio routing rules apply automatically."
+            "Start SoundCorral at login so audio routing rules apply automatically."
             if autostart
-            else "Do not start SinkSwitch automatically at login."
+            else "Do not start SoundCorral automatically at login."
         )
         opts = {
             "handle_token": token,
