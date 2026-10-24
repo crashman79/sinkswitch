@@ -117,6 +117,7 @@ class GlobalShortcutsController(QObject):
         self._session_handle: Optional[str] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._configure_requested = threading.Event()
         self.status_changed.connect(self._on_status_changed)
         self.activated.connect(self._on_activated_action)
 
@@ -151,6 +152,7 @@ class GlobalShortcutsController(QObject):
 
         self._handlers = dict(handlers)
         self._stop_event = threading.Event()
+        self._configure_requested = threading.Event()
         self._thread = threading.Thread(
             target=self._run,
             args=(modifier,),
@@ -160,9 +162,17 @@ class GlobalShortcutsController(QObject):
         self._thread.start()
         return True
 
+    def configure(self) -> bool:
+        """Ask the running session to open the desktop's shortcut settings."""
+        if not self._session_handle or not self._thread or not self._thread.is_alive():
+            return False
+        self._configure_requested.set()
+        return True
+
     def stop(self) -> None:
         """Close the session and release any bound shortcuts."""
         self._stop_event.set()
+        self._configure_requested.clear()
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=3.0)
@@ -382,13 +392,18 @@ class GlobalShortcutsController(QObject):
             )
 
     def _listen(self, conn, session: str) -> None:
+        # Portal signals are emitted on the portal object path; the session
+        # handle is the first argument, not the signal path.
         rule = MatchRule(
             type="signal",
             interface=PORTAL_IFACE,
-            path=session,
+            path=PORTAL_PATH,
         )
         with conn.filter(rule) as queue:
             while not self._stop_event.is_set():
+                if self._configure_requested.is_set():
+                    self._configure_requested.clear()
+                    self._configure_shortcuts(conn, session)
                 try:
                     message = conn.recv_until_filtered(queue, timeout=1.0)
                 except TimeoutError:
@@ -399,6 +414,8 @@ class GlobalShortcutsController(QObject):
                 member = message.header.fields.get(HeaderFields.member)
                 args = message.body
                 if len(args) < 2:
+                    continue
+                if str(_variant_value(args[0])) != session:
                     continue
                 if member == "Activated":
                     shortcut_id = _variant_value(args[1])

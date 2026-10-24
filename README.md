@@ -118,12 +118,23 @@ If your desktop provides a system tray, SoundCorral adds an icon with **Show**, 
 | Theme | System (follow desktop) | Follows your desktop theme, or forces Light or Dark. |
 | Close to tray | Off | Closing the window hides it in the tray instead of quitting. |
 | Auto-mono for single-earbud Bluetooth | On | Mixes stereo to mono when a one-channel Bluetooth output is detected; keeps stereo when both channels are available. |
-| Use a modifier + volume keys to control the Bluetooth device | On | Enables the optional modifier + volume shortcut described below. |
-| Modifier key | Ctrl | The modifier used with Volume Up, Volume Down, and Mute (Ctrl, Super, or Alt). |
+| Use global shortcuts to control the Bluetooth device | On | Enables the optional Bluetooth volume shortcuts described below. |
 
-The **Bluetooth volume shortcuts** option lets you control only the Bluetooth output with a modifier plus the normal volume keys, for example Ctrl + Volume Up. Plain volume keys still control your speakers through your desktop as usual. This uses the desktop's Global Shortcuts portal.
+### Bluetooth volume shortcuts
 
-The first time you enable it, your desktop may show a shortcut permission/configuration dialog. Accept it to bind the three shortcuts. If your desktop does not assign the keys automatically, SoundCorral opens the shortcut settings for you; alternatively, open **System Settings → Shortcuts**, find SoundCorral, and assign the Bluetooth volume shortcuts there. The status line under the setting tells you whether the keys are active or still need to be assigned. If the portal is unavailable or you deny the request, the rest of the app still works normally.
+If you want a shortcut that changes only the Bluetooth device's volume while the plain volume keys keep controlling your speakers, enable **Use global shortcuts to control the Bluetooth device**.
+
+SoundCorral suggests **Ctrl+Volume Up**, **Ctrl+Volume Down**, and **Ctrl+Volume Mute**, but the actual keys are assigned in your desktop's shortcut settings:
+
+1. Enable the option and click **Apply and save**.
+2. Your desktop may show a shortcut approval/configuration dialog. Approve the three SoundCorral shortcuts.
+3. If the dialog does not appear, click **Open shortcut settings** in SoundCorral, or open **System Settings → Shortcuts**, find **SoundCorral**, and assign:
+   - Raise Bluetooth volume → `Ctrl+Volume Up`
+   - Lower Bluetooth volume → `Ctrl+Volume Down`
+   - Mute or unmute Bluetooth → `Ctrl+Volume Mute`
+4. The status line under the setting tells you whether the keys are active.
+
+Plain volume keys still control your speakers through your desktop as usual. The shortcuts control only the Bluetooth device, not the system default output. This uses the desktop's Global Shortcuts portal; a bare modifier alone is not supported, so the shortcut must be a key combination. If the portal is unavailable or you deny the request, the rest of the app still works normally.
 
 ## Rules file
 

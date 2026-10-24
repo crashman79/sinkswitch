@@ -693,7 +693,6 @@ def _load_app_settings() -> Dict[str, Any]:
         "theme": str,
         "devices_streams_split_pct": int,
         "volume_shortcuts_enabled": bool,
-        "volume_shortcut_modifier": str,
     }
     s = QSettings("io.github.crashman79", "sinkswitch")
     out: Dict[str, Any] = {}
@@ -744,7 +743,6 @@ def _save_app_settings(data: Dict[str, Any]) -> None:
         "theme",
         "devices_streams_split_pct",
         "volume_shortcuts_enabled",
-        "volume_shortcut_modifier",
     }
     s = QSettings("io.github.crashman79", "sinkswitch")
     s.beginGroup("prefs")
@@ -1189,7 +1187,6 @@ class AudioRouterGUI(QMainWindow):
         self.devices_streams_split_pct = int(settings.get('devices_streams_split_pct', 50) or 50)
         self.devices_streams_split_pct = max(20, min(80, self.devices_streams_split_pct))
         self.volume_shortcuts_enabled = settings.get('volume_shortcuts_enabled', True)
-        self.volume_shortcut_modifier = settings.get('volume_shortcut_modifier', 'Ctrl')
         self._volume_engine: Optional['AudioRouterEngine'] = None
         self._status_icon_cache: Dict[str, QIcon] = {}
         self._device_type_icon_cache: Dict[str, QIcon] = {}
@@ -1752,29 +1749,28 @@ class AudioRouterGUI(QMainWindow):
         vol_group = QGroupBox("Bluetooth volume shortcuts")
         vol_layout = QVBoxLayout()
         self.volume_shortcuts_check = QCheckBox(
-            "Use a modifier + volume keys to control the Bluetooth device"
+            "Use global shortcuts to control the Bluetooth device"
         )
         self.volume_shortcuts_check.setChecked(self.volume_shortcuts_enabled)
         self.volume_shortcuts_check.setToolTip(
             "Plain volume keys still control your main/speaker output (handled by the "
-            "desktop). Hold the chosen modifier with Volume Up/Down/Mute to adjust the "
-            "Bluetooth device instead."
+            "desktop). The shortcut keys are assigned in your desktop's shortcut "
+            "settings; SoundCorral suggests Ctrl+Volume Up/Down/Mute."
         )
         vol_layout.addWidget(self.volume_shortcuts_check)
 
-        mod_row = QHBoxLayout()
-        mod_row.addWidget(QLabel("Modifier key:"))
-        self.volume_shortcut_modifier_combo = QComboBox()
-        self.volume_shortcut_modifier_combo.addItems(["Ctrl", "Super", "Alt"])
-        idx = {"Ctrl": 0, "Super": 1, "Alt": 2}.get(self.volume_shortcut_modifier, 0)
-        self.volume_shortcut_modifier_combo.setCurrentIndex(idx)
-        self.volume_shortcut_modifier_combo.setEnabled(self.volume_shortcuts_enabled)
-        self.volume_shortcuts_check.toggled.connect(
-            self.volume_shortcut_modifier_combo.setEnabled
+        explainer = QLabel(
+            "Plain volume keys still control your speakers. Assign the Bluetooth "
+            "volume shortcuts in your desktop's shortcut settings (Ctrl+Volume "
+            "Up/Down/Mute is suggested); playing those keys then adjusts only the "
+            "Bluetooth device. Use the button below to reopen that page."
         )
-        mod_row.addWidget(self.volume_shortcut_modifier_combo)
-        mod_row.addStretch()
-        vol_layout.addLayout(mod_row)
+        explainer.setWordWrap(True)
+        vol_layout.addWidget(explainer)
+
+        self.open_shortcuts_btn = QPushButton("Open shortcut settings")
+        self.open_shortcuts_btn.clicked.connect(self._open_shortcut_settings)
+        vol_layout.addWidget(self.open_shortcuts_btn)
 
         self.volume_shortcuts_status_label = QLabel("")
         self.volume_shortcuts_status_label.setWordWrap(True)
@@ -1949,7 +1945,6 @@ class AudioRouterGUI(QMainWindow):
         close_to_tray = self.close_to_tray_check.isChecked()
         auto_mono_single_channel_bluetooth = self.auto_mono_single_channel_bluetooth_check.isChecked()
         volume_shortcuts_enabled = self.volume_shortcuts_check.isChecked()
-        volume_shortcut_modifier = self.volume_shortcut_modifier_combo.currentText()
         theme_map = {0: "system", 1: "light", 2: "dark"}
         theme = theme_map.get(self.theme_combo.currentIndex(), "system")
         mono_changed = auto_mono_single_channel_bluetooth != self.auto_mono_single_channel_bluetooth
@@ -1959,7 +1954,6 @@ class AudioRouterGUI(QMainWindow):
         self.close_to_tray = close_to_tray
         self.auto_mono_single_channel_bluetooth = auto_mono_single_channel_bluetooth
         self.volume_shortcuts_enabled = volume_shortcuts_enabled
-        self.volume_shortcut_modifier = volume_shortcut_modifier
         self.theme_setting = theme
         _save_app_settings({
             **_load_app_settings(),
@@ -1971,7 +1965,6 @@ class AudioRouterGUI(QMainWindow):
             'force_bluetooth_mono': self.force_bluetooth_mono,
             'theme': theme,
             'volume_shortcuts_enabled': volume_shortcuts_enabled,
-            'volume_shortcut_modifier': volume_shortcut_modifier,
         })
         # Defer palette apply to next event loop to avoid re-entrancy crash in Qt
         app = QApplication.instance()
@@ -2095,7 +2088,17 @@ class AudioRouterGUI(QMainWindow):
                 ACTION_VOLUME_DOWN: lambda: self._on_bt_volume_action(ACTION_VOLUME_DOWN),
                 ACTION_MUTE: lambda: self._on_bt_volume_action(ACTION_MUTE),
             },
-            modifier=self.volume_shortcut_modifier,
+        )
+
+    def _open_shortcut_settings(self) -> None:
+        """Reopen the desktop's shortcut configuration for this app."""
+        ctrl = getattr(self, "volume_shortcuts_controller", None)
+        if ctrl is not None and ctrl.configure():
+            self.statusBar().showMessage("Opening shortcut settings...", 2500)
+            return
+        self._on_volume_shortcuts_status(
+            "warn",
+            "Enable the Bluetooth volume shortcuts first, then open the shortcut settings.",
         )
 
     def _on_volume_shortcuts_status(self, level: str, message: str) -> None:
