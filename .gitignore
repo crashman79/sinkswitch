@@ -22,6 +22,18 @@ src/_version.py
 *.swo
 *~
 
+# AI/agent tooling notes and instructions
+.github/copilot-instructions.md
+.github/instructions/
+.cursor/
+.copilot/
+.windsurf/
+.continue/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.aider*
+
 # OS
 .DS_Store
 Thumbs.db
