@@ -154,4 +154,4 @@ modules:
     sources:
       - type: git
         url: https://github.com/crashman79/sinkswitch.git
-        commit: 22dd4195ad680bc6f97fe613753302b71b86ce5a
+        commit: c6a318c31bea9a16fc242b1e531596f588af0a1e
