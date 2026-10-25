@@ -141,10 +141,14 @@ Plain volume keys still control your speakers through your desktop as usual. The
 Rules are stored as plain YAML in:
 
 ```
+# from source
 ~/.config/sinkswitch/config/routing_rules.yaml
+
+# Flatpak build
+~/.var/app/io.github.crashman79.sinkswitch/config/sinkswitch/config/routing_rules.yaml
 ```
 
-The folder keeps the original `sinkswitch` name (the internal app ID), so existing settings continue to work after the display-name change. You can set the `AUDIO_ROUTER_CONFIG` environment variable to use a different folder. Editing the file by hand is optional; the app writes it when you add, edit, or quick-route rules.
+The folder keeps the original `sinkswitch` name (the internal app ID), so existing settings continue to work after the display-name change. The Flatpak keeps its configuration inside its own persistent sandbox directory. You can set the `AUDIO_ROUTER_CONFIG` environment variable to use a different folder. Editing the file by hand is optional; the app writes it when you add, edit, or quick-route rules.
 
 A rule looks like this:
 

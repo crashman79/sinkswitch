@@ -50,7 +50,15 @@ _CONFIG_DIR = os.environ.get("AUDIO_ROUTER_CONFIG")
 if _CONFIG_DIR:
     _CONFIG_DIR = Path(_CONFIG_DIR)
 else:
-    _CONFIG_DIR = Path.home() / ".config" / "sinkswitch"
+    # Respect XDG_CONFIG_HOME. Inside the Flatpak sandbox this points at the
+    # persistent ~/.var/app/<id>/config directory; using ~/.config directly
+    # would write into an ephemeral sandbox path and lose rules on restart.
+    _xdg_config = os.environ.get("XDG_CONFIG_HOME")
+    _CONFIG_DIR = (
+        Path(_xdg_config) / "sinkswitch"
+        if _xdg_config
+        else Path.home() / ".config" / "sinkswitch"
+    )
 os.environ["AUDIO_ROUTER_CONFIG"] = str(_CONFIG_DIR)
 os.environ["AUDIO_ROUTER_LAUNCH_CMD"] = _LAUNCH_CMD
 os.environ["AUDIO_ROUTER_WORKING_DIR"] = str(_APP_DIR)

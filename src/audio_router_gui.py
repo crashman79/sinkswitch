@@ -511,9 +511,14 @@ class MonitorThread(QThread):
                 if retry_after is not None:
                     schedule_retry(retry_after)
                 for r in results:
+                    # Don't announce fallback/default routing. It happens
+                    # routinely when a Bluetooth target is disconnected and is
+                    # not something the user needs a tray notification for.
+                    if r.get('fallback') or r.get('rule_name') == 'Default fallback':
+                        continue
                     if r.get('success') and r.get('routed_count', 0) > 0:
                         self.routing_notification.emit(
-                            "Audio Router",
+                            "SoundCorral",
                             f"{r.get('rule_name', 'Route')}: {r.get('message', '')}",
                         )
 
@@ -2829,13 +2834,22 @@ class AudioRouterGUI(QMainWindow):
             try:
                 router = IntelligentAudioRouter()
                 config = router.generate_routing_config()
-                
-                if config and 'routing_rules' in config:
-                    self.rules = config['routing_rules']
+                generated = (config or {}).get('routing_rules') or []
+
+                if generated:
+                    self.rules = generated
                     self.update_rules_table()
                     self.statusBar().showMessage("Rules auto-generated (don't forget to save)", 3000)
                 else:
-                    QMessageBox.warning(self, "No Rules", "Could not generate any rules")
+                    # Generating while no suitable device is connected returns
+                    # an empty list. Keep the existing rules instead of blanking
+                    # the table and making the rules look like they vanished.
+                    QMessageBox.information(
+                        self, "No Rules Generated",
+                        "No routing rules could be generated from the currently "
+                        "connected devices. Connect a Bluetooth or USB device and "
+                        "try again. Existing rules were kept."
+                    )
             except Exception as e:
                 logger.error(f"Error auto-generating rules: {e}")
                 QMessageBox.critical(self, "Error", f"Failed to auto-generate rules: {e}")
