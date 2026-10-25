@@ -37,18 +37,34 @@ except ImportError:
     __build_timestamp__ = "source"
 
 # Config base: set by run_app.py or default
+def _instance_lock_path() -> Path:
+    """Return a lock path shared by every instance in this user session.
+
+    XDG_CACHE_HOME is the Flatpak's persistent per-app cache directory, so a
+    manually launched instance and the login-autostart instance see the same
+    file. Path.home()/".cache" is not reliable inside the sandbox.
+    """
+    cache_home = os.environ.get("XDG_CACHE_HOME")
+    base = Path(cache_home) if cache_home else (Path.home() / ".cache")
+    return base / "sinkswitch" / "sinkswitch.lock"
+
+
 def _acquire_single_instance_lock() -> bool:
     """Acquire an exclusive lock so only one instance runs. Returns True if we got the lock."""
     global _SINGLE_INSTANCE_LOCK_FILE
     if "--replace-and-run" in sys.argv:
         return True
-    lock_path = UPDATES_CACHE_DIR / ".lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = _instance_lock_path()
     try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
         _SINGLE_INSTANCE_LOCK_FILE = open(lock_path, "w")
         fcntl.flock(_SINGLE_INSTANCE_LOCK_FILE.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _SINGLE_INSTANCE_LOCK_FILE.write(str(os.getpid()))
+        _SINGLE_INSTANCE_LOCK_FILE.flush()
+        logger.info("Single-instance lock acquired: %s (PID %s)", lock_path, os.getpid())
         return True
-    except (BlockingIOError, OSError):
+    except (BlockingIOError, OSError) as e:
+        logger.warning("Another instance is already running (lock %s): %s", lock_path, e)
         if _SINGLE_INSTANCE_LOCK_FILE is not None:
             try:
                 _SINGLE_INSTANCE_LOCK_FILE.close()
