@@ -1828,12 +1828,32 @@ class AudioRouterGUI(QMainWindow):
         _wrap_plain(f"Version {__version__}")
         _wrap_plain(f"Build timestamp (UTC): {__build_timestamp__}")
         sl.addSpacing(12)
-        _wrap_rich("<b>Default routing (out of the box)</b>")
+        _wrap_rich("<b>What SoundCorral is for</b>")
         _wrap_plain(
-            "On first run, SoundCorral creates a config and may auto-generate routing rules from your connected devices "
-            "(e.g. browsers, meetings, media -> Bluetooth or USB headset). You can edit or remove these in the Routing Rules tab. "
-            "Until you click Start, the router does nothing. Once running, matched streams follow rules; "
-            "everything else goes to the Default output in the toolbar."
+            "SoundCorral is built for one specific job: send the audio from selected apps or "
+            "streams to Bluetooth earbuds or headphones, while your game, desktop sounds, and "
+            "everything else keep playing through your primary output (speakers, HDMI, or a "
+            "USB headset)."
+        )
+        _wrap_plain(
+            "A typical setup is a game on your main screen and speakers, with the audio from a "
+            "second screen, browser, video, or call going to your earbuds. You do not have to "
+            "move your whole system output; only the apps you choose are redirected. Bluetooth "
+            "earbuds are the primary target, but rules can also send apps to USB, HDMI, or "
+            "analog devices."
+        )
+        sl.addSpacing(12)
+        _wrap_rich("<b>How it works</b>")
+        _wrap_plain(
+            "Match an app with a routing rule and choose its target device. When that app plays, "
+            "SoundCorral moves its stream to the target automatically. Apps that match no rule "
+            "stay on the Default output selected in the toolbar. You can also select a currently "
+            "playing stream and use the quick-route buttons for a temporary or permanent change."
+        )
+        _wrap_plain(
+            "On first run, SoundCorral creates a starter set of rules from the devices it finds. "
+            "Edit or remove them in Routing Rules. Routing starts automatically when the app "
+            "opens by default; use Start/Restart/Stop in the toolbar to control it."
         )
         sl.addSpacing(12)
         _wrap_rich("<b>Technology</b>")

@@ -2,6 +2,8 @@
 
 SoundCorral is a Linux desktop app that lets you choose where each app's audio plays. You can keep a browser on Bluetooth headphones, a game on your speakers, and a call on a USB headset at the same time, without changing the output for everything else.
 
+Its main use case is simple: keep your game and desktop sounds on your primary speakers, and send the audio from a second-screen app, browser, video, or call to Bluetooth earbuds. Only the apps you choose are redirected; everything else stays on your Default output.
+
 Everything runs inside the app. There is no account, no cloud service, and no separate background daemon to install or manage.
 
 ## What it does
